@@ -59,6 +59,7 @@ ffi.cdef[[
   void eqgfx_add_screen_line(float x1, float y1, float x2, float y2, uint32_t color);
   void eqgfx_add_screen_rect(float x0, float y0, float x1, float y1, uint32_t color);
   void eqgfx_world_to_screen(float x, float y, float z, float* sx, float* sy, int* visible);
+  void eqgfx_project(float x, float y, float z, float* sx, float* sy, int* infront);
 ]]
 
 -- Optional hard override for the DLL location (Windows-style path). Normally
@@ -187,10 +188,21 @@ function M.world_to_screen(x, y, z)
   return tonumber(_sx[0]), tonumber(_sy[0]), _vis[0] ~= 0
 end
 
+-- Project a world point to RAW screen pixels (no on-screen clamp) and return
+-- the engine's in-front-of-camera bool. Use this (not world_to_screen's
+-- `visible`) when you need a reliable per-vertex front test for off-screen
+-- points - e.g. triangulating a ring you stand inside. Returns sx, sy, infront.
+local _px, _py, _pf = ffi.new('float[1]'), ffi.new('float[1]'), ffi.new('int[1]')
+function M.project(x, y, z)
+  lib.eqgfx_project(x, y, z, _px, _py, _pf)
+  return tonumber(_px[0]), tonumber(_py[0]), _pf[0] ~= 0
+end
+
 -- Returns a plain Lua table {targetType, range, aeRange, coneStart, coneEnd}
 -- or nil if the spell wasn't found.
 function M.spell_geom(spellID)
   if lib.eqgfx_get_spell_geom(spellID, geom) == 0 then return nil end
+  ---@diagnostic disable
   return {
     targetType = geom.targetType,
     range      = geom.range,
@@ -199,6 +211,7 @@ function M.spell_geom(spellID)
     coneEnd    = geom.coneEnd,
   }
 end
+---@diagnostic enable
 
 -- Color helpers. Engine RGB byte order is unverified; if colors look wrong
 -- in-game, switch argb -> abgr and we'll lock it down.

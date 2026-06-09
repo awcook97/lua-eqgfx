@@ -334,6 +334,20 @@ __declspec(dllexport) void eqgfx_world_to_screen(float x, float y, float z,
 	if (sx) *sx = ox; if (sy) *sy = oy; if (visible) *visible = v ? 1 : 0;
 }
 
+// Project a world point and return the RAW screen pixels (NO on-screen rect
+// clamp) plus the engine's own in-front-of-camera bool. The engine's
+// ProjectWorldCoordinatesToScreen (vtable 29) returns true only when the point
+// is in front of the camera, so `infront` is a reliable per-vertex front test -
+// unlike eqgfx_world_to_screen's `visible`, which ANDs that with an on-screen
+// test and so is false for merely-off-screen-but-in-front points too. Callers
+// that triangulate large rings need this to skip wedges straddling the camera.
+__declspec(dllexport) void eqgfx_project(float x, float y, float z,
+                                         float* sx, float* sy, int* infront) {
+	float ox = 0, oy = 0;
+	bool v = WorldToScreen(x, y, z, ox, oy);
+	if (sx) *sx = ox; if (sy) *sy = oy; if (infront) *infront = v ? 1 : 0;
+}
+
 __declspec(dllexport) void eqgfx_stats(uint32_t* sceneCalls, uint32_t* lastDraws) {
 	if (sceneCalls) *sceneCalls = g_sceneCalls.load(std::memory_order_relaxed);
 	if (lastDraws)  *lastDraws  = g_lastDraws.load(std::memory_order_relaxed);
