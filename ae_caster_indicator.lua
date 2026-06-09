@@ -15,11 +15,21 @@
 
 local mq    = require('mq')
 local eqgfx = require('eqgfx')
+local log   = require('eqgfx.lib.lwlogger')
+
+log.SetAppName('eqgfx')
+log.SetModuleName('ae_caster')
+log.SetColors(true)
+log.SetIncludeTime("milliseconds")
+log.SetLevel(log.INFO)        -- verbose: show per-spell geometry (Debug/Trace)
+log.SetIncludeCharacter("Server.Character.Zone")
+log.SetOutputFile(mq.configDir .. "/eqgfx.log")
+log.SetIncludeSource("trace")
 
 local ok, err = eqgfx.init()
-if not ok then printf('[ae] init failed: %s', err) return end
+if not ok then log.Error('init failed: %s', err) return end
 eqgfx.set_thickness(4)
-print('[ae] running.  /aering [r] = toggle a debug ring on you.')
+log.Info('running.  /aering [r] = toggle a debug ring on you.')
 
 local TT       = eqgfx.TargetType
 local SEGMENTS = 48
@@ -42,11 +52,11 @@ local debugRing, debugRadius = false, 40
 mq.bind('/aering', function(r)
   if r and r ~= '' then debugRadius = tonumber(r) or debugRadius end
   debugRing = not debugRing
-  printf('[ae] debug ring = %s (radius %g)', tostring(debugRing), debugRadius)
+  log.Info('debug ring = %s (radius %g)', tostring(debugRing), debugRadius)
 end)
 mq.bind('/aerad', function(r)
   debugRadius = tonumber(r) or debugRadius
-  printf('[ae] debug ring radius = %g', debugRadius)
+  log.Info('debug ring radius = %g', debugRadius)
 end)
 
 -- EQ heading (deg, 0=N) -> world atan2 angle in TLO (X=E/W, Y=N/S). Correct at
@@ -64,8 +74,8 @@ local function draw_for_spell(g)
 
   if tt == TT.DirectionalCone then
     local facing = facing_rad(heading)
-    printf('[ae]   CONE caster (%.1f,%.1f,%.1f) r=%.1f face=%.0f arc=%d..%d',
-           cx, cy, cz, radius, heading, g.coneStart, g.coneEnd)
+    log.Debug('  CONE caster (%.1f,%.1f,%.1f) r=%.1f face=%.0f arc=%d..%d',
+              cx, cy, cz, radius, heading, g.coneStart, g.coneEnd)
     if math.abs(g.coneEnd - g.coneStart) < 0.5 then
       eqgfx.add_circle(cx, cy, cz, radius, COLOR, SEGMENTS)
     else
@@ -75,7 +85,7 @@ local function draw_for_spell(g)
     local f   = facing_rad(heading)
     local len = (g.range and g.range > 0) and g.range or radius
     local hw  = (g.aeRange and g.aeRange > 0) and g.aeRange or 5
-    printf('[ae]   BEAM caster (%.1f,%.1f,%.1f) len=%.1f hw=%.1f face=%.0f', cx, cy, cz, len, hw, heading)
+    log.Debug('  BEAM caster (%.1f,%.1f,%.1f) len=%.1f hw=%.1f face=%.0f', cx, cy, cz, len, hw, heading)
     local fx, fy = math.cos(f), math.sin(f)
     local px, py = -fy, fx
     local function corner(d, w) return cx + fx*d + px*w, cy + fy*d + py*w end
@@ -86,18 +96,18 @@ local function draw_for_spell(g)
     eqgfx.add_line(dx, dy, cz, ex, ey, cz, COLOR)
     eqgfx.add_line(ex, ey, cz, ax, ay, cz, COLOR)
   elseif CASTER_CENTERED[tt] then
-    printf('[ae]   PBAE caster (%.1f,%.1f,%.1f) r=%.1f', cx, cy, cz, radius)
+    log.Debug('  PBAE caster (%.1f,%.1f,%.1f) r=%.1f', cx, cy, cz, radius)
     eqgfx.add_circle(cx, cy, cz, radius, COLOR, SEGMENTS)
   elseif TARGET_CENTERED[tt] then
     local t = mq.TLO.Target
     if t.ID() and t.ID() > 0 and t.X() then
-      printf('[ae]   TGTAE target "%s" (%.1f,%.1f,%.1f) r=%.1f', t.CleanName() or '?', t.X(), t.Y(), t.Z(), radius)
+      log.Debug('  TGTAE target "%s" (%.1f,%.1f,%.1f) r=%.1f', t.CleanName() or '?', t.X(), t.Y(), t.Z(), radius)
       eqgfx.add_circle(t.X(), t.Y(), t.Z(), radius, COLOR, SEGMENTS)
     else
-      print('[ae]   TGTAE but no target')
+      log.Debug('  TGTAE but no target')
     end
   else
-    print('[ae]   (single/self/other - nothing to draw)')
+    log.Trace('  (single/self/other - nothing to draw)')
   end
 end
 
@@ -114,7 +124,7 @@ while true do
       eqgfx.add_line(x, y, z, x + debugRadius, y, z, eqgfx.argb(255, 255, 255, 0))
       if os.clock() - (debugLast or 0) >= 1.0 then
         local sx, sy, vis = eqgfx.world_to_screen(x, y, z)
-        printf('[ae] you world=(%.1f,%.1f,%.1f) -> screen=(%.0f,%.0f) vis=%s', x, y, z, sx, sy, tostring(vis))
+        log.Debug('you world=(%.1f,%.1f,%.1f) -> screen=(%.0f,%.0f) vis=%s', x, y, z, sx, sy, tostring(vis))
         debugLast = os.clock()
       end
     end
@@ -125,9 +135,9 @@ while true do
     local g = eqgfx.spell_geom(id)
     if g then
       if id ~= lastId then
-        printf('[ae] CAST id=%d "%s" tt=%d(%s) aeRange=%.1f range=%.1f cone=%d..%d',
-               id, mq.TLO.Spell(id).Name() or '?', g.targetType, TTNAME[g.targetType] or '?',
-               g.aeRange, g.range, g.coneStart, g.coneEnd)
+        log.Info('CAST id=%d "%s" tt=%d(%s) aeRange=%.1f range=%.1f cone=%d..%d',
+                 id, mq.TLO.Spell(id).Name() or '?', g.targetType, TTNAME[g.targetType] or '?',
+                 g.aeRange, g.range, g.coneStart, g.coneEnd)
         lastId = id
       end
       draw_for_spell(g)

@@ -17,17 +17,27 @@
 local mq    = require('mq')
 local eqgfx = require('eqgfx')
 local ImGui = require('ImGui')
+local log   = require('eqgfx.lib.lwlogger')
+
+log.SetAppName('eqgfx')
+log.SetModuleName('healthbars')
+log.SetColors(true)
+log.SetIncludeTime('seconds')
+log.SetLevel(log.TRACE)
+log.SetIncludeCharacter("Server.Character.Zone")
+log.SetIncludeTime("milliseconds")
+log.SetOutputFile(mq.configDir .. "/eqgfx.log")
 
 local ok, err = eqgfx.init()
-if not ok then printf('[hb] init failed: %s', err) return end
+if not ok then log.Error('init failed: %s', err) return end
 
 local BAR_W, BAR_H = 80, 9
 local HEAD_Z       = 4
 local ROUND        = 2.0
 
 local radius, npcOnly = 200, true
-mq.bind('/hbradius', function(n) radius = tonumber(n) or radius; printf('[hb] radius=%d', radius) end)
-mq.bind('/hbnpc',    function()  npcOnly = not npcOnly; printf('[hb] npc-only=%s', tostring(npcOnly)) end)
+mq.bind('/hbradius', function(n) radius = tonumber(n) or radius; log.Info('radius=%d', radius) end)
+mq.bind('/hbnpc',    function()  npcOnly = not npcOnly; log.Info('npc-only=%s', tostring(npcOnly)) end)
 
 local function col(r, g, b, a)
   a = a or 255
@@ -89,7 +99,7 @@ local function draw()
 end
 
 mq.imgui.init('healthbars', draw)
-print('[hb] health bars running (ImGui, live tracking). /hbradius N  /hbnpc')
+log.Info('health bars running (ImGui, live tracking). /hbradius N  /hbnpc')
 
 -- Slow discovery loop: decide the visible set; mark departed spawns lost.
 local function spec() return (npcOnly and 'npc ' or '') .. 'radius ' .. radius end

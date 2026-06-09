@@ -19,18 +19,25 @@
 
 local mq    = require('mq')
 local eqgfx = require('eqgfx')
+local log   = require('eqgfx.lib.lwlogger')
+
+log.SetAppName('eqgfx')
+log.SetModuleName('debug')
+log.SetColors(true)
+log.SetIncludeTime('seconds')
+log.SetLevel(log.DEBUG)        -- show the periodic scene/draw counters
 
 local ok, err = eqgfx.init()
-if not ok then printf('[eqgfx_debug] init failed: %s', err) return end
+if not ok then log.Error('init failed: %s', err) return end
 
 -- One-time vtable sanity check: should print your real screen resolution.
 local w, h = eqgfx.probe()
-printf('[eqgfx_debug] probe: display = %d x %d  (should be your resolution)', w, h)
+log.Info('probe: display = %d x %d  (should be your resolution)', w, h)
 
 -- Turn on the fixed 2D test line (top-left diagonal). If THIS shows but the 3D
 -- pole/ring don't, the vtable is right and only the 3D coord path is wrong.
 eqgfx.test2d(true)
-print('[eqgfx_debug] running - look for: a yellow 2D diagonal AND giant red/green/blue 3D lines through you')
+log.Info('running - look for: a yellow 2D diagonal AND giant red/green/blue 3D lines through you')
 
 local RED   = eqgfx.argb(255, 255, 0, 0)
 local GREEN = eqgfx.argb(255, 0, 255, 0)
@@ -53,8 +60,8 @@ while true do
 
   if os.clock() - last >= 1.0 then
     local scene, draws = eqgfx.stats()
-    printf('[eqgfx_debug] scene=%d draws=%d  me=(%.1f, %.1f, %.1f)',
-           scene, draws, x or -1, y or -1, z or -1)
+    log.Debug('scene=%d draws=%d  me=(%.1f, %.1f, %.1f)',
+              scene, draws, x or -1, y or -1, z or -1)
     last = os.clock()
   end
   mq.delay(50)
