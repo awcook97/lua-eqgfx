@@ -1,0 +1,7 @@
+# MSVC build intermediates
+*.obj
+*.exp
+*.lib
+*.pdb
+*.ilk
+# eqgfx.dll
