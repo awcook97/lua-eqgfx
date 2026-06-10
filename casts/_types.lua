@@ -9,6 +9,7 @@
 ---@field spellName string|nil
 ---@field startedAt number       os.clock() when the cast was detected
 ---@field duration number        seconds (from Spell.CastTime; 3s fallback)
+---@field spellIcon integer|nil  SpellIcon cell in the A_SpellIcons atlas
 ---@field isSelf boolean
 ---@field sawAnim boolean|nil    spawn was seen in a casting animation
 ---@field lastAnimAt number|nil  last time the cast animation was observed

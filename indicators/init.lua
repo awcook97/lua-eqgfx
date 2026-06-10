@@ -88,7 +88,8 @@ end)
 -- Per-frame draw callback.
 ----------------------------------------------------------------------------
 local function draw()
-  local dl = ImGui.GetForegroundDrawList()
+  -- background list: world geometry stays under ImGui windows
+  local dl = ImGui.GetBackgroundDrawList()
 
   if settings.data.showDebugRing then render.draw_debug_ring(dl) end
 

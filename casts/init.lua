@@ -43,6 +43,13 @@ local function dbg(fmt, ...)
   if cfg.log then cfg.log.Debug(fmt, ...) end
 end
 
+local function spell_icon(spellID)
+  if not spellID then return nil end
+  local ic = mq.TLO.Spell(spellID).SpellIcon()
+  if type(ic) == 'number' and ic >= 0 then return ic end
+  return nil
+end
+
 local function cast_seconds(spellID)
   if not spellID then return 3 end
   local ms = mq.TLO.Spell(spellID).MyCastTime()
@@ -91,6 +98,20 @@ local function on_cast(line, casterName)
   dbg('cast evt: "%s" -> %s (id=%s)', casterName, tostring(spellName), tostring(spellID))
 end
 
+-- Interrupt lines name the caster directly - far more reliable than the
+-- animation heuristic (which needs the spawn close enough to see the anim).
+local function on_interrupt(name)
+  if not name or name == '' then return end
+  local now = os.clock()
+  for _, a in pairs(active) do
+    if not a.isSelf and not a.interrupted and a.casterName == name then
+      a.interrupted, a.interruptedAt = true, now
+      dbg('cast interrupted (event): %s', name)
+    end
+  end
+  pendingByName[name] = nil
+end
+
 ---@param opts table|nil  overrides for cfg fields (log, trackSelf, ...)
 function M.init(opts)
   if opts then for k, v in pairs(opts) do cfg[k] = v end end
@@ -100,6 +121,11 @@ function M.init(opts)
   -- form carries the spell link in the raw line (keepLinks).
   mq.event('eqgfx_casts1', "#1# begins to cast #2#.#*#", function(l, n) on_cast(l, n) end, { keepLinks = true })
   mq.event('eqgfx_casts2', "#1# begins casting #2#.#*#", function(l, n) on_cast(l, n) end, { keepLinks = true })
+  mq.event('eqgfx_casts_i1', "#1#'s casting is interrupted#*#",     function(_, n) on_interrupt(n) end)
+  mq.event('eqgfx_casts_i2', "#1#'s spell is interrupted#*#",        function(_, n) on_interrupt(n) end)
+  -- actual live format: "Soandso's Adamant Stance spell is interrupted."
+  mq.event('eqgfx_casts_i3', "#1#'s #2# spell is interrupted#*#",    function(_, n) on_interrupt(n) end)
+  mq.event('eqgfx_casts_i4', "#1#'s #2# casting is interrupted#*#",  function(_, n) on_interrupt(n) end)
 end
 
 -- Runtime toggles (settings menus call this).
@@ -116,6 +142,7 @@ local function update_self(now)
       selfSpellID = sc
       local ci = types.CastInfo(myid, mq.TLO.Me.CleanName() or 'me', sc,
                                 mq.TLO.Spell(sc).Name(), cast_seconds(sc), true, now)
+      ci.spellIcon = spell_icon(sc)
       active[myid] = ci
     end
   else
@@ -141,6 +168,7 @@ function M.update(now)
       local id = sp.ID()
       local ci = types.CastInfo(id, name, p.spellID, p.spellName,
                                 cast_seconds(p.spellID), false, now)
+      ci.spellIcon = spell_icon(p.spellID)
       if CAST_ANIMS[sp.Animation()] then ci.sawAnim, ci.lastAnimAt = true, now end
       active[id] = ci
       pendingByName[name] = nil
