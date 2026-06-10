@@ -1,5 +1,5 @@
 --[[
-  eqgfx_calibrate.lua
+  tools/calibrate.lua
 
   Magenta box is now self-centered using the real display size (pure 2D).
   Green crosshair = where world->screen currently projects your character.
@@ -8,8 +8,8 @@
   engine's OWN world->camera transform for your position and for +50 along each
   TLO axis. From those deltas I can derive the exact projection - no guessing.
 
-  Run:   /lua run eqgfx_calibrate
-  Stop:  /lua stop eqgfx_calibrate
+  Run:   /lua run eqgfx/tools/calibrate
+  Stop:  /lua stop eqgfx/tools/calibrate
 ]]
 
 local mq    = require('mq')

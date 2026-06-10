@@ -1,11 +1,11 @@
 --[[
-  eqgfx_debug.lua - isolate WHY nothing draws.
+  tools/debug.lua - isolate WHY nothing draws.
 
   Draws a fixed marker on your own character every frame (independent of any
   spell logic): a tall vertical line + a ground ring. Also prints the render
   counters once a second.
 
-  Run:  /lua run eqgfx_debug
+  Run:  /lua run eqgfx/tools/debug
 
   Read the printout:
     * scene=0 (never increasing)  -> MQ is NOT calling our render callback
@@ -31,13 +31,10 @@ local ok, err = eqgfx.init()
 if not ok then log.Error('init failed: %s', err) return end
 
 -- One-time vtable sanity check: should print your real screen resolution.
-local w, h = eqgfx.probe()
-log.Info('probe: display = %d x %d  (should be your resolution)', w, h)
+local w, h = eqgfx.get_screen()
+log.Info('display = %d x %d  (should be your resolution)', w, h)
 
--- Turn on the fixed 2D test line (top-left diagonal). If THIS shows but the 3D
--- pole/ring don't, the vtable is right and only the 3D coord path is wrong.
-eqgfx.test2d(true)
-log.Info('running - look for: a yellow 2D diagonal AND giant red/green/blue 3D lines through you')
+log.Info('running - look for giant red/green/blue 3D lines through you')
 
 local RED   = eqgfx.argb(255, 255, 0, 0)
 local GREEN = eqgfx.argb(255, 0, 255, 0)
