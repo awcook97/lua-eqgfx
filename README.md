@@ -22,6 +22,16 @@ It ships two feature scripts:
 
 ---
 
+## Documentation
+
+| Doc | What's in it |
+|-----|--------------|
+| [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | Install, first run, feature tour, settings scopes, troubleshooting |
+| [docs/COMMANDS.md](docs/COMMANDS.md) | Every slash command + how to read `/npdebug` |
+| [docs/DEVELOPING.md](docs/DEVELOPING.md) | Architecture, building the DLL, engine facts & conventions |
+
+---
+
 ## How it works
 
 Three problems, three solutions:

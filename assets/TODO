@@ -1,0 +1,26 @@
+# Image requests
+#
+# Drop screenshots into assets/ with the suggested filename, then replace the
+# matching <!-- IMAGE: ... --> comment (or placeholder link) at the listed
+# document line with: ![alt text](../assets/<filename>)
+# A handful is plenty - the four GETTING_STARTED ones matter most.
+
+README.md:21  (replace the "![demo placeholder](#)" link)
+  assets/demo.png - the money shot: a busy scene with several nameplates
+  (HP bars + names + a cast bar) AND a ground AE ring visible at once.
+
+docs/GETTING_STARTED.md:46
+  assets/nameplates-overview.png - a few plates on NPCs/PCs showing the HP
+  gradient, a name, buff icon rows, and a cast bar with spell icon + timer.
+
+docs/GETTING_STARTED.md:82
+  assets/nameplates-occlusion.png - a plate half-behind an open EQ window
+  (inventory works well) in Clip mode, visibly sliding underneath it.
+
+docs/GETTING_STARTED.md:101
+  assets/nameplates-ae-highlight.png - mid-PBAE cast with two or three NPC
+  plates tinted orange (bonus: one PC plate light blue from a group buff).
+
+docs/GETTING_STARTED.md:114
+  assets/indicators-overview.png - a caster-centered ring or cone drawn on
+  the ground while something casts (enemy color reads best).

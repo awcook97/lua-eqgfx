@@ -7,3 +7,9 @@
 # eqgfx.dll
 # per-build hot-load copies (core/init.lua)
 eqgfx_run_*.dll
+# export dumps from the local MQ install (dev reference only; not needed to
+# build or run - the DLL resolves everything by name at runtime)
+native/MQ2Main.def
+native/eqlib.def
+# internal research notes
+docs/hidden/
