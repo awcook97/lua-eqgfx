@@ -411,11 +411,13 @@ mq.bind('/npdebug', function()
     log.Info('ui sweep stats unavailable (old eqgfx.dll loaded - restart EQ)')
   end
   local D = uirects.debug
-  log.Info('ui map: raw=%d kept=%d anchor(EQMainWnd)=%s screen=%sx%s o=(%.0f,%.0f) k=(%.3f,%.3f)',
-           D.raw, D.kept, tostring(D.anchored), tostring(D.sw), tostring(D.sh),
-           D.ox, D.oy, D.kx, D.ky)
-  if D.firstRaw then
-    log.Info('ui map: first raw rect = %.0f,%.0f .. %.0f,%.0f (scan units, pre-map)',
+  log.Info('ui rects: raw=%d kept=%d screen=%sx%s (GetScreenRect = render pixels, identity)',
+           D.raw, D.kept, tostring(D.sw), tostring(D.sh))
+  if D.firstKept then
+    log.Info('ui rects: first kept = %s %.0f,%.0f .. %.0f,%.0f',
+             D.firstKept.name or '?', D.firstKept[1], D.firstKept[2], D.firstKept[3], D.firstKept[4])
+  elseif D.firstRaw then
+    log.Info('ui rects: first RAW = %.0f,%.0f .. %.0f,%.0f (nothing kept - paste this!)',
              D.firstRaw[1], D.firstRaw[2], D.firstRaw[3], D.firstRaw[4])
   end
   log.Info('use /npui show to draw detected occluder rects on screen')

@@ -28,9 +28,15 @@ local pushedNames = {}
 local pushed = false
 
 local function push_names()
-  local all = {}
-  for _, n in ipairs(baseNames) do all[#all + 1] = n end
-  for _, n in ipairs(extraNames) do all[#all + 1] = n end
+  local all, seen = {}, {}
+  local function add(n)
+    if n and n ~= '' and not seen[n] then
+      seen[n] = true
+      all[#all + 1] = n
+    end
+  end
+  for _, n in ipairs(baseNames) do add(n) end
+  for _, n in ipairs(extraNames) do add(n) end
   eqgfx.set_ui_names(all)
   pushedNames = all
   pushed = true
@@ -41,48 +47,25 @@ function M.add_names(list)
   pushed = false
 end
 
--- Last-resort scale when EQMainWnd isn't in the scan: one-shot Window-TLO
--- read of the canvas size vs the render resolution.
-local tloScaleX, tloScaleY = 1, 1
-local calibrated = false
-
-local function calibrate_tlo()
-  calibrated = true
-  pcall(function()
-    local mq = require('mq')
-    local main = mq.TLO.Window('EQMainWnd')
-    local mw, mh = main.Width(), main.Height()
-    local sw, sh = eqgfx.get_screen()
-    if mw and mw > 0 and mh and mh > 0 and sw and sw > 0 and sh and sh > 0 then
-      if math.abs(sw - mw) > 2 or math.abs(sh - mh) > 2 then
-        tloScaleX, tloScaleY = sw / mw, sh / mh
-      end
-    end
-  end)
-end
-
 -- Diagnostics snapshot of the last get() (printed by /npdebug).
 ---@class UiRectsDebug
 ---@field raw integer    rects from the DLL sweep
----@field kept integer   rects after mapping/filtering
----@field anchored boolean EQMainWnd anchor found in the scan
+---@field kept integer   rects after clamping/filtering
 ---@field sw number|nil  render resolution
 ---@field sh number|nil
----@field ox number      coordinate map: px = (scan - o) * k
----@field oy number
----@field kx number
----@field ky number
----@field firstRaw number[]|nil  first raw rect from the sweep, untouched
-M.debug = { raw = 0, kept = 0, anchored = false, ox = 0, oy = 0, kx = 1, ky = 1 }
+---@field firstRaw number[]|nil   first raw rect from the sweep, untouched
+---@field firstKept table|nil     first kept rect (clamped, with .name)
+M.debug = { raw = 0, kept = 0 }
 
 -- Fetch every call - no clocks, no caching. The native path is one FFI call.
 --
--- COORDINATE SPACE: CXWnd::GetScreenRect units are not necessarily render
--- pixels (UI scaling / canvas offsets). Rather than guess, the scan list
--- includes EQMainWnd - the full UI canvas - and its OWN scanned rect anchors
--- the affine map scan-units -> render pixels (origin AND scale). Rects are
--- then clamped to the screen, never discarded for being "out of bounds":
--- a partially off-screen window still occludes its on-screen part.
+-- COORDINATE SPACE: CXWnd::GetScreenRect returns RENDER PIXELS directly -
+-- verified in-game (rect 1745,90..1825,200 inside a 1920x1023 screen). Two
+-- earlier "calibration" attempts both corrupted good data by scaling against
+-- EQMainWnd, which is NOT the fullscreen canvas on this client - it's the
+-- small EQ-button window (52x94 at the bottom-left). So: identity transform,
+-- clamp to the screen (a half-off-screen window still occludes its visible
+-- part), drop only empty leftovers and near-fullscreen HUD layers.
 ---@return table rects, boolean native
 function M.get()
   if not pushed and eqgfx.ui_native then push_names() end
@@ -98,49 +81,26 @@ function M.get()
   local sw, sh = eqgfx.get_screen()
   local haveScreen = (sw and sw > 0 and sh and sh > 0) and true or false
 
-  local main
-  for _, rect in ipairs(raw) do
-    if rect.idx and pushedNames[rect.idx] == 'EQMainWnd' then main = rect break end
-  end
-  local ox, oy, kx, ky = 0, 0, 1, 1
-  if main and haveScreen then
-    local mwidth, mheight = main[3] - main[1], main[4] - main[2]
-    if mwidth > 0 and mheight > 0 then
-      ox, oy = main[1], main[2]
-      kx, ky = sw / mwidth, sh / mheight
-    end
-  elseif haveScreen then
-    if not calibrated then calibrate_tlo() end
-    kx, ky = tloScaleX, tloScaleY
-  end
-
   local out = {}
   for _, rect in ipairs(raw) do
-    local name = rect.idx and pushedNames[rect.idx] or nil
-    if name ~= 'EQMainWnd' then          -- the canvas itself never occludes
-      local x0 = (rect[1] - ox) * kx
-      local y0 = (rect[2] - oy) * ky
-      local x1 = (rect[3] - ox) * kx
-      local y1 = (rect[4] - oy) * ky
-      if haveScreen then
-        if x0 < 0 then x0 = 0 end
-        if y0 < 0 then y0 = 0 end
-        if x1 > sw then x1 = sw end
-        if y1 > sh then y1 = sh end
-      end
-      -- near-fullscreen layers never occlude either (HUD-style overlays)
-      local full = haveScreen and (x1 - x0) * (y1 - y0) >= sw * sh * 0.9
-      if x1 > x0 and y1 > y0 and not full then
-        out[#out + 1] = { x0, y0, x1, y1, name = name }
-      end
+    local x0, y0, x1, y1 = rect[1], rect[2], rect[3], rect[4]
+    if haveScreen then
+      if x0 < 0 then x0 = 0 end
+      if y0 < 0 then y0 = 0 end
+      if x1 > sw then x1 = sw end
+      if y1 > sh then y1 = sh end
+    end
+    -- near-fullscreen layers never occlude (canvas/HUD-style windows)
+    local full = haveScreen and (x1 - x0) * (y1 - y0) >= sw * sh * 0.9
+    if x1 > x0 and y1 > y0 and not full then
+      out[#out + 1] = { x0, y0, x1, y1, name = rect.idx and pushedNames[rect.idx] or nil }
     end
   end
 
   M.debug.raw, M.debug.kept = #raw, #out
-  M.debug.anchored = main and true or false
   M.debug.sw, M.debug.sh = sw, sh
-  M.debug.ox, M.debug.oy, M.debug.kx, M.debug.ky = ox, oy, kx, ky
   M.debug.firstRaw = raw[1]
+  M.debug.firstKept = out[1]
 
   M.rects = out
   return out, true
