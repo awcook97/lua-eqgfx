@@ -34,6 +34,19 @@ Get buff information by hovering the buffs. Uses cached buffs so you don't have 
 
 Customize just about every aspect!
 
+## Commands
+
+| Command | What it does |
+|---------|--------------|
+| `/npmenu` | Toggle the settings window. Every widget applies live and auto-saves. |
+| `/npradius N` | Set the plate range filter (world units). Same as the Radius slider. |
+| `/nppcs` | Quick-toggle plates for other players. |
+| `/npdebug` | Print a health report to the MQ console / log (see below). |
+| `/npui` | List the EQ windows the native occlusion scan currently sees, with their rects. |
+| `/npui show` | Toggle an on-screen overlay outlining every detected occluder rect with its window name. |
+| `/npui add <Name>` | Track an extra window name for occlusion (find names with `/windows`). Persisted in settings. |
+
+
 ## DocTyped
 
 Need to make edits? Everything is typed and annotated so you can easily find the functions and fields that you are looking for.
@@ -47,6 +60,16 @@ See your AEs, friendly AEs, and enemy AEs as they are being cast. Uses EQBC to c
 ## Customizable
 
 ![spell_indicator_customizable_menu.png](./assets/spell_indicator_customizable_menu.png)
+
+## Commands
+
+| Command | What it does |
+|---------|--------------|
+| `/aemenu` | Toggle the settings window. |
+| `/aering [r]` | Toggle a fixed debug ring of radius `r` around you (calibration aid). |
+| `/aerad r` | Change the debug ring radius. |
+| `/aez z` | Ground offset: how far below a spawn's reported Z to draw areas (fixes floating/buried rings on uneven ground). |
+
 
 
 # EQGFX Native Lib
