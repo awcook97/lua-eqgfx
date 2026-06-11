@@ -43,7 +43,7 @@ and `/lua stop eqgfx/indicators`.
 
 ## Nameplates tour
 
-<!-- IMAGE: nameplates-overview -->
+![nameplates with cast bars and buff rows, a cone AE marking plates](../assets/my_cone_plus_friendly_buff.png)
 
 Every nearby spawn (NPCs, PCs, pets/mercs, optionally yourself — each
 toggleable) gets a plate that tracks it frame-accurately:
@@ -79,7 +79,7 @@ switch to hiding the whole plate instead ("Behind-window style" in `/npmenu`).
 If some custom window isn't being detected, see `/npui` in
 [COMMANDS.md](COMMANDS.md).
 
-<!-- IMAGE: nameplates-occlusion -->
+![plates occluded by an open EQ window](../assets/occlusion.png)
 
 ### AE cast highlight
 
@@ -98,7 +98,7 @@ adds 10%, capped at five. Colors, the stack curve, which sources to watch,
 and the tint/border/glow/pulse styling are all in `/npmenu` under
 "AE cast highlight".
 
-<!-- IMAGE: nameplates-ae-highlight -->
+![a PBAE in flight marking the plates it will hit](../assets/pb_ae.png)
 
 The area shapes mirror what the indicators feature draws: caster-centered
 rings, target-centered rings, cones and beams, taken from the spell's real
@@ -111,7 +111,7 @@ caster targeted.
 
 ## Indicators tour
 
-<!-- IMAGE: indicators-overview -->
+![a plate with buff icons, an anonymized name and an interrupted cast](../assets/interrupted.png)
 
 While you or nearby spawns cast, the affected area is drawn on the ground:
 

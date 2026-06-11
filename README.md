@@ -18,7 +18,7 @@ It ships two feature scripts:
 - **`indicators`** — while you or nearby mobs cast, draws the spell's affected
   area (PBAE / targeted-AE ring, directional cone, or beam) on the ground.
 
-![demo placeholder](#)
+![nameplates marked by an AE area in flight](assets/Main.png)
 
 ---
 
