@@ -257,45 +257,68 @@ using FnWndBool  = bool  (*)(void* self);
 using FnWndRect  = EqRect* (*)(void* self, EqRect* out);     // 16-byte aggregate -> hidden ptr
 
 static void*     g_findWnd  = nullptr;
-static int       g_findMode = 0;       // 0 = unprobed, 1 = char*, 2 = string_view
+static int       g_findMode = 0;       // 0 unprobed, 1 char*, 2 string_view,
+                                       // 3/4 = same via deref'd offset var, -1 gave up
 static FnWndBool g_wndVis  = nullptr;
 static FnWndBool g_wndMin  = nullptr;
 static FnWndRect g_wndRect = nullptr;
 static std::vector<std::string> g_uiNames;
 static std::mutex g_uiMutex;
+static int g_uiStatNames = 0, g_uiStatFound = 0, g_uiStatFaults = 0;
 
+// The MANGLED ?...@eqlib@@ exports are real compiled eqlib member functions.
+// The flat CXWnd__* names are EQLIB_VAR uintptr_t OFFSET VARIABLES holding the
+// game function's address (same convention as the pinst* exports) - "calling"
+// the variable executes its data bytes, faults into the SEH probe handler, and
+// the sweep silently reports zero windows while eqgfx_ui_available() still
+// says 1. So: prefer the mangled functions, deref the flat variables only as
+// a fallback for builds that don't export the mangled names.
 static void resolve_ui_symbols() {
 	if (HMODULE mq = GetModuleHandleA("MQ2Main.dll"))
 		g_findWnd = reinterpret_cast<void*>(GetProcAddress(mq, "FindMQ2Window"));
 	if (HMODULE eq = GetModuleHandleA("eqlib.dll")) {
-		g_wndVis = reinterpret_cast<FnWndBool>(GetProcAddress(eq, "CXWnd__IsReallyVisible"));
-		if (!g_wndVis)
-			g_wndVis = reinterpret_cast<FnWndBool>(GetProcAddress(eq, "?IsReallyVisible@CXWnd@eqlib@@QEBA_NXZ"));
+		g_wndVis = reinterpret_cast<FnWndBool>(GetProcAddress(eq, "?IsReallyVisible@CXWnd@eqlib@@QEBA_NXZ"));
+		if (!g_wndVis) {
+			uintptr_t* v = reinterpret_cast<uintptr_t*>(GetProcAddress(eq, "CXWnd__IsReallyVisible"));
+			if (v && *v) g_wndVis = reinterpret_cast<FnWndBool>(*v);
+		}
 		g_wndMin = reinterpret_cast<FnWndBool>(GetProcAddress(eq, "?IsMinimized@CXWnd@eqlib@@QEBA_NXZ"));
-		g_wndRect = reinterpret_cast<FnWndRect>(GetProcAddress(eq, "CXWnd__GetScreenRect"));
-		if (!g_wndRect)
-			g_wndRect = reinterpret_cast<FnWndRect>(GetProcAddress(eq, "?GetScreenRect@CXWnd@eqlib@@QEBA?AVCXRect@2@XZ"));
+		g_wndRect = reinterpret_cast<FnWndRect>(GetProcAddress(eq, "?GetScreenRect@CXWnd@eqlib@@QEBA?AVCXRect@2@XZ"));
+		if (!g_wndRect) {
+			uintptr_t* v = reinterpret_cast<uintptr_t*>(GetProcAddress(eq, "CXWnd__GetScreenRect"));
+			if (v && *v) g_wndRect = reinterpret_cast<FnWndRect>(*v);
+		}
 	}
 }
 
 // SEH-isolated per-window calls: engine-side faults degrade to "no rect",
 // never to a client crash. (No C++ objects in these frames - C2712.)
-static void* seh_find_a(const char* name) {
-	__try { return ((FnFindWndA)g_findWnd)(name); }
+static void* seh_find_a(void* fn, const char* name) {
+	__try { return ((FnFindWndA)fn)(name); }
 	__except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
 
-static void* seh_find_b(const char* name, size_t len) {
+static void* seh_find_b(void* fn, const char* name, size_t len) {
 	SvArg sv{ name, len };
-	__try { return ((FnFindWndB)g_findWnd)(&sv); }
+	__try { return ((FnFindWndB)fn)(&sv); }
+	__except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+// Safely read a uintptr_t export slot (FindMQ2Window-as-offset-variable case).
+static void* seh_deref(void* p) {
+	__try { return (void*)*(uintptr_t*)p; }
 	__except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
 
 static void* seh_find(const std::string& name) {
-	if (g_findMode == 2) return seh_find_b(name.c_str(), name.size());
-	return seh_find_a(name.c_str());
+	void* fn = g_findWnd;
+	if (g_findMode >= 3) { fn = seh_deref(fn); if (!fn) return nullptr; }
+	if (g_findMode == 2 || g_findMode == 4) return seh_find_b(fn, name.c_str(), name.size());
+	return seh_find_a(fn, name.c_str());
 }
 
+// 1 = rect written, 0 = window filtered (hidden/minimized/empty), -1 = the
+// call faulted (export/ABI mismatch - surfaced through eqgfx_ui_stats).
 static int seh_probe(void* w, float* o) {
 	__try {
 		if (!g_wndVis(w)) return 0;
@@ -307,7 +330,7 @@ static int seh_probe(void* w, float* o) {
 		o[2] = (float)r.right; o[3] = (float)r.bottom;
 		return 1;
 	}
-	__except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+	__except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +341,7 @@ static int seh_probe(void* w, float* o) {
 // the render hook, reads from the script, handoff under one small mutex.
 // ---------------------------------------------------------------------------
 static float g_uiCache[512];          // 128 rects * 4
+static int   g_uiCacheIdx[128];       // per rect: index into the pushed name list
 static int   g_uiCacheCount = 0;
 
 static void ui_sweep_on_render() {
@@ -325,26 +349,37 @@ static void ui_sweep_on_render() {
 	std::lock_guard<std::mutex> lock(g_uiMutex);
 	if (g_uiNames.empty()) return;
 
-	// one-time ABI probe (const char* vs string_view) on the game thread
+	// One-time ABI probe on the game thread: direct call with const char* /
+	// string_view (modes 1/2), then the same through a deref'd offset variable
+	// (modes 3/4). On total failure mark -1 - a names re-push re-probes.
 	if (g_findMode == 0) {
-		for (const auto& n : g_uiNames) {
-			if (seh_find_a(n.c_str())) { g_findMode = 1; break; }
-		}
-		if (g_findMode == 0) {
+		for (int m = 1; m <= 4 && g_findMode == 0; ++m) {
+			void* fn = g_findWnd;
+			if (m >= 3) { fn = seh_deref(fn); if (!fn) continue; }
 			for (const auto& n : g_uiNames) {
-				if (seh_find_b(n.c_str(), n.size())) { g_findMode = 2; break; }
+				void* w = (m == 2 || m == 4) ? seh_find_b(fn, n.c_str(), n.size())
+				                             : seh_find_a(fn, n.c_str());
+				if (w) { g_findMode = m; break; }
 			}
 		}
-		if (g_findMode == 0) return;
+		if (g_findMode == 0) g_findMode = -1;
 	}
+	if (g_findMode < 0) return;
 
-	int count = 0;
+	int count = 0, faults = 0, idx = -1;
 	for (const auto& n : g_uiNames) {
+		++idx;
 		if (count >= 128) break;
-		if (void* w = seh_find(n))
-			count += seh_probe(w, g_uiCache + count * 4);
+		if (void* w = seh_find(n)) {
+			int r = seh_probe(w, g_uiCache + count * 4);
+			if (r > 0) { g_uiCacheIdx[count] = idx; ++count; }
+			else if (r < 0) ++faults;
+		}
 	}
 	g_uiCacheCount = count;
+	g_uiStatNames  = (int)g_uiNames.size();
+	g_uiStatFound  = count;
+	g_uiStatFaults = faults;
 }
 
 extern "C" {
@@ -353,6 +388,7 @@ extern "C" {
 __declspec(dllexport) void eqgfx_set_ui_names(const char* newlineSeparated) {
 	std::lock_guard<std::mutex> lock(g_uiMutex);
 	g_uiNames.clear();
+	if (g_findMode < 0) g_findMode = 0;     // fresh names -> allow a re-probe
 	if (!newlineSeparated) return;
 	const char* p = newlineSeparated;
 	while (*p) {
@@ -377,14 +413,36 @@ __declspec(dllexport) int eqgfx_get_ui_rects(float* out, int maxRects) {
 	return count;
 }
 
+// Same snapshot plus, per rect, the 0-based index into the name list pushed
+// via eqgfx_set_ui_names - so Lua knows WHICH window each rect belongs to
+// (EQMainWnd anchors the coordinate-space calibration; /npui lists names).
+__declspec(dllexport) int eqgfx_get_ui_rects2(float* out, int* nameIdx, int maxRects) {
+	if (!out || maxRects <= 0 || !eqgfx_ui_available()) return 0;
+	std::lock_guard<std::mutex> lock(g_uiMutex);
+	int count = g_uiCacheCount < maxRects ? g_uiCacheCount : maxRects;
+	if (count > 0) {
+		memcpy(out, g_uiCache, (size_t)count * 4 * sizeof(float));
+		if (nameIdx) memcpy(nameIdx, g_uiCacheIdx, (size_t)count * sizeof(int));
+	}
+	return count;
+}
+
 // Compile stamp so /npdebug can prove WHICH dll the game actually loaded.
 __declspec(dllexport) const char* eqgfx_build() {
 	return __DATE__ " " __TIME__;
 }
 
-// 0 = unprobed/none, 1 = const char*, 2 = string_view (for /npdebug)
+// 0 unprobed, 1 char*, 2 string_view, 3/4 deref'd variants, -1 none worked.
 __declspec(dllexport) int eqgfx_ui_find_mode() {
 	return g_findMode;
+}
+
+// Last sweep's health: candidate names, rects found, probe faults. faults > 0
+// means an export/ABI mismatch - the failure is loud instead of silent.
+__declspec(dllexport) void eqgfx_ui_stats(int* names, int* found, int* faults) {
+	if (names)  *names  = g_uiStatNames;
+	if (found)  *found  = g_uiStatFound;
+	if (faults) *faults = g_uiStatFaults;
 }
 
 

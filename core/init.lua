@@ -63,8 +63,10 @@ ffi.cdef[[
   void eqgfx_set_ui_names(const char* newlineSeparated);
   int  eqgfx_ui_available();
   int  eqgfx_ui_find_mode();
+  void eqgfx_ui_stats(int* names, int* found, int* faults);
   const char* eqgfx_build();
   int  eqgfx_get_ui_rects(float* out, int maxRects);
+  int  eqgfx_get_ui_rects2(float* out, int* nameIdx, int maxRects);
 ]]
 
 -- Optional hard override for the DLL location (Windows-style path). Normally
@@ -191,10 +193,20 @@ function M.build()
   return okk and v or 'pre-2026-06-10 (stale - restart EQ)'
 end
 
--- FindMQ2Window ABI variant in use (0 none/unprobed, 1 char*, 2 string_view).
+-- FindMQ2Window ABI variant in use (0 unprobed, 1 char*, 2 string_view,
+-- 3/4 the same through a deref'd offset variable, -1 nothing worked).
 function M.ui_find_mode()
   local okk, v = pcall(function() return lib.eqgfx_ui_find_mode() end)
   return okk and v or -1
+end
+
+-- Last sweep's health: candidate names, rects found, probe faults. faults > 0
+-- means an export/ABI mismatch in the native scan. nil on a stale dll.
+local _usn, _usf, _usx = ffi.new('int[1]'), ffi.new('int[1]'), ffi.new('int[1]')
+function M.ui_stats()
+  local okk = pcall(function() lib.eqgfx_ui_stats(_usn, _usf, _usx) end)
+  if not okk then return nil end
+  return tonumber(_usn[0]), tonumber(_usf[0]), tonumber(_usx[0])
 end
 
 -- Candidate window names for the native UI scan (newline-joined internally).
@@ -288,17 +300,21 @@ function M.project(x, y, z)
   return tonumber(_px[0]), tonumber(_py[0]), _pf[0] ~= 0
 end
 
--- Visible, top-level, non-minimized native EQ window rects, straight from
--- CXWndManager. Returns an array of {x0, y0, x1, y1}, or nil when the native
--- path is unavailable.
+-- Visible, top-level, non-minimized native EQ window rects. Returns an array
+-- of {x0, y0, x1, y1, idx = N} where idx is the 1-based position in the name
+-- list pushed via set_ui_names (nil on a stale dll without the v2 export),
+-- or nil when the native path is unavailable.
 local _uiBuf = ffi.new('float[512]')   -- 128 rects max
+local _uiIdx = ffi.new('int[128]')
 function M.get_ui_rects()
   if not M.ui_native then return nil end
-  local n = lib.eqgfx_get_ui_rects(_uiBuf, 128)
+  local okk, n = pcall(function() return lib.eqgfx_get_ui_rects2(_uiBuf, _uiIdx, 128) end)
+  if not okk then n = lib.eqgfx_get_ui_rects(_uiBuf, 128) end
   local t = {}
   for i = 0, n - 1 do
     t[i + 1] = { tonumber(_uiBuf[i * 4]),     tonumber(_uiBuf[i * 4 + 1]),
-                 tonumber(_uiBuf[i * 4 + 2]), tonumber(_uiBuf[i * 4 + 3]) }
+                 tonumber(_uiBuf[i * 4 + 2]), tonumber(_uiBuf[i * 4 + 3]),
+                 idx = okk and (tonumber(_uiIdx[i]) + 1) or nil }
   end
   return t
 end

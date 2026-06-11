@@ -10,7 +10,11 @@ It ships two feature scripts:
 - **`nameplates`** — animated, flicker-free nameplates over nearby spawns: HP
   bar, name text, a cast bar showing the spell + time remaining, and a full
   in-game customization menu (`/npmenu` — colors, sizes, name position,
-  animations).
+  animations). Plates clip around (or hide behind) the native EQ windows
+  instead of drawing over them, and in-flight AE casts (yours, other
+  players', NPCs') highlight the plates they will affect — orange for spawns
+  they will harm, light blue for ones they will help, deeper color the more
+  AEs overlap (colors/animation/stacking configurable).
 - **`indicators`** — while you or nearby mobs cast, draws the spell's affected
   area (PBAE / targeted-AE ring, directional cone, or beam) on the ground.
 

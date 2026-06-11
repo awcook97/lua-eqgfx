@@ -107,8 +107,12 @@ function M.draw(caps)
 		ImGui.Separator()
 		check("Enabled", cfg, "enabled")
 		slideri("Radius", cfg, "radius", 20, 500)
-		check("Hide plates behind EQ windows", cfg, "hideUnderUI")
+		check("Occlude plates behind EQ windows", cfg, "hideUnderUI")
 		if cfg.hideUnderUI then
+			combo("Behind-window style", cfg, "uiOccludeMode", types.UiOccludeModeLabels)
+			if caps.clipRect == false then
+				ImGui.TextDisabled("(clipping unavailable in this MQ build - hiding instead)")
+			end
 			ImGui.TextDisabled("(missing a window? /windows for names, /npui add <Name>)")
 		end
 		ImGui.Separator()
@@ -316,6 +320,38 @@ function M.draw(caps)
 					sliderf("Target border thickness", cfg.target, "borderThickness", 0.5, 6.0)
 				end
 				check("Glow on target", cfg.target, "glow")
+			end
+		end
+
+		if ImGui.CollapsingHeader("AE cast highlight") then
+			check("Highlight plates AE casts will affect", cfg.aehl, "enabled")
+			if cfg.aehl.enabled then
+				ImGui.Text("Watch casts from")
+				check("My casts", cfg.aehl, "fromMe")
+				check("Other players (and pets/mercs)", cfg.aehl, "fromPCs")
+				check("NPCs (their AEs mark PC plates)", cfg.aehl, "fromNPCs")
+				ImGui.Separator()
+				color("Will harm (detrimental)", cfg.colors, "aeDet")
+				color("Will help (beneficial)", cfg.colors, "aeBen")
+				check("Tint HP bar", cfg.aehl, "tintBar")
+				if cfg.aehl.tintBar then
+					sliderf("  Tint strength", cfg.aehl, "strength", 0.1, 1.0, "%.2f")
+				end
+				check("Tint border", cfg.aehl, "tintBorder")
+				check("Glow rings", cfg.aehl, "glow")
+				check("Pulse", cfg.aehl, "pulse")
+				if cfg.aehl.pulse then
+					sliderf("  Pulse rate", cfg.aehl, "pulseSpeed", 0.2, 4.0, "%.1f Hz")
+					sliderf("  Pulse depth", cfg.aehl, "pulseAmount", 0.05, 0.9, "%.2f")
+				end
+				sliderf("Fade in/out speed", cfg.aehl, "fadeSpeed", 1.0, 30.0, "%.1f")
+				ImGui.Separator()
+				ImGui.Text("Stacking (overlapping AEs deepen the color)")
+				sliderf("One AE", cfg.aehl, "stackBase", 0.1, 1.0, "%.2f")
+				sliderf("Each extra AE", cfg.aehl, "stackStep", 0.0, 0.3, "%.2f")
+				slideri("Count cap", cfg.aehl, "stackMax", 1, 10)
+				ImGui.TextDisabled("(detrimental AEs mark the caster's enemies; beneficial")
+				ImGui.TextDisabled(" mark its allies - NPC AEs never mark other NPCs)")
 			end
 		end
 

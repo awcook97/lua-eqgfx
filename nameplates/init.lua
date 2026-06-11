@@ -19,7 +19,15 @@
   Plates render inside a fullscreen pass-through ImGui window pinned to the
   back of the window stack, so they stay UNDER other ImGui windows (consoles,
   menus). EQ's own UI windows are drawn by the game before MQ's overlay and
-  cannot be layered above ImGui from Lua.
+  cannot be layered above ImGui from Lua - so plates that overlap a native
+  window are CLIPPED around its rect (default) or hidden whole, using each
+  plate's measured footprint from the previous frame (plate.ext).
+
+  AE cast highlight: every in-flight area cast (mine, other players', NPCs')
+  marks the plates it will affect - detrimental marks the caster's enemies
+  in cfg.colors.aeDet, beneficial marks its allies in aeBen - and overlapping
+  areas deepen the highlight (stack alpha curve). nameplates/ae.lua owns the
+  area math; the per-plate counting lives in draw_plates.
 
   Run:  /lua run eqgfx/nameplates
   Stop: /lua stop eqgfx/nameplates
@@ -38,6 +46,7 @@ local anim     = require('eqgfx.nameplates.anim')
 local settings = require('eqgfx.nameplates.settings')
 local render   = require('eqgfx.nameplates.render')
 local menu     = require('eqgfx.nameplates.menu')
+local ae       = require('eqgfx.nameplates.ae')
 local casts    = require('eqgfx.casts')
 local uirects  = require('eqgfx.lib.uirects')
 
@@ -82,7 +91,8 @@ local function scan_ui_rects(names)
     uiRects = nrects
     if names then
       for idx, rect in ipairs(nrects) do
-        names[idx] = string.format('rect %d,%d %dx%d', rect[1], rect[2],
+        names[idx] = string.format('%s %d,%d %dx%d', rect.name or 'rect',
+                                   rect[1], rect[2],
                                    rect[3] - rect[1], rect[4] - rect[2])
       end
       if #nrects == 0 then names[1] = '(native: no visible windows)' end
@@ -98,15 +108,40 @@ local function scan_ui_rects(names)
   end
 end
 
-local function under_ui(cfg, sx, sy)
-  if not cfg.hideUnderUI then return false end
-  local hw = cfg.bar.width * 0.5 + 10
-  local x0, y0 = sx - hw, sy - 26
-  local x1, y1 = sx + hw, sy + cfg.castbar.height + 28
-  for _, rect in ipairs(uiRects) do
-    if x0 < rect[3] and x1 > rect[1] and y0 < rect[4] and y1 > rect[2] then return true end
+-- Per-plate native-UI occlusion. The plate's bbox is its measured footprint
+-- from the previous frame (plate.ext, recorded by render.plate) at the
+-- current position - over-estimating is harmless (the clip regions come from
+-- the window rects, not the bbox), under-estimating leaks pixels, hence PAD.
+-- Returns hide(boolean)[, hits, bbox]: hits/bbox set when the plate should
+-- be drawn CLIPPED around the overlapping window rects.
+local PAD = 12   -- slack for glow rings, bob, buff appear-flash growth
+
+local function occlusion(cfg, plate, hasCast)
+  if not cfg.hideUnderUI or #uiRects == 0 then return false end
+  local bx0, by0, bx1, by1
+  local ext = plate.ext
+  if ext then
+    bx0, by0 = plate.sx + ext[1] - PAD, plate.sy + ext[2] - PAD
+    bx1, by1 = plate.sx + ext[3] + PAD, plate.sy + ext[4] + PAD
+  else
+    local hw = cfg.bar.width * 0.5 + 120     -- not drawn yet: generous guess
+    bx0, by0, bx1, by1 = plate.sx - hw, plate.sy - 90, plate.sx + hw, plate.sy + 110
   end
-  return false
+  if hasCast then   -- cast bar may appear before ext catches up (1 frame)
+    by1 = by1 + cfg.castbar.gap + cfg.castbar.height + cfg.castbar.textSize + 2
+  end
+  local hits
+  for _, rect in ipairs(uiRects) do
+    if bx0 < rect[3] and bx1 > rect[1] and by0 < rect[4] and by1 > rect[2] then
+      hits = hits or {}
+      hits[#hits + 1] = rect
+    end
+  end
+  if not hits then return false end
+  if cfg.uiOccludeMode == types.UiOccludeMode.HIDE or not render.caps.clipRect then
+    return true   -- hide the whole plate (or clipping is unavailable here)
+  end
+  return false, hits, { bx0, by0, bx1, by1 }
 end
 
 ----------------------------------------------------------------------------
@@ -188,6 +223,7 @@ local function draw_plates(drawList, cfg, timeNow, dt)
   local tgtID = mq.TLO.Target.ID() or 0
   local me = mq.TLO.Me
   local mex, mey, mez = me.X() or 0, me.Y() or 0, me.Z() or 0
+  local aeStates = cfg.aehl.enabled and ae.states(cfg, mex, mey, mez) or nil
   local jobs = {}
 
   for id, plate in pairs(plates) do
@@ -203,12 +239,35 @@ local function draw_plates(drawList, cfg, timeNow, dt)
         local sx, sy, vis = eqgfx.world_to_screen(x, y, z + cfg.bar.zOffset)
         if vis then
           plate.sx, plate.sy = sx, sy
-          if not under_ui(cfg, sx, sy) then
-            local castInfo = nil
-            if cfg.castbar.show and (not cfg.castbar.onlyTarget or isTarget) then
-              castInfo = casts.get(id)
+          -- AE highlight: count how many in-flight areas cover this plate
+          -- (det outranks ben) and map the count onto the stack alpha curve.
+          -- aeKind lingers so the fade-out keeps its color after marks drop.
+          local detN, benN = 0, 0
+          if aeStates then
+            for si = 1, #aeStates do
+              local k = ae.affects(aeStates[si], plate, x, y, z)
+              if k == 'det' then detN = detN + 1
+              elseif k == 'ben' then benN = benN + 1 end
             end
-            jobs[#jobs + 1] = { plate = plate, castInfo = castInfo, isTarget = isTarget }
+          end
+          local kind = detN > 0 and 'det' or (benN > 0 and 'ben' or nil)
+          local target = 0
+          if kind then
+            local hl = cfg.aehl
+            local n = math.min(detN > 0 and detN or benN, hl.stackMax)
+            target = math.min(hl.stackBase + hl.stackStep * (n - 1), 1)
+            plate.aeKind = kind
+          end
+          plate.aeAmt = anim.approach(plate.aeAmt or 0, target, cfg.aehl.fadeSpeed, dt)
+          if not kind and plate.aeAmt < 0.01 then plate.aeKind = nil end
+          local castInfo = nil
+          if cfg.castbar.show and (not cfg.castbar.onlyTarget or isTarget) then
+            castInfo = casts.get(id)
+          end
+          local hide, hits, bbox = occlusion(cfg, plate, castInfo ~= nil)
+          if not hide then
+            jobs[#jobs + 1] = { plate = plate, castInfo = castInfo, isTarget = isTarget,
+                                hits = hits, bbox = bbox }
           end
         end
       else
@@ -219,9 +278,14 @@ local function draw_plates(drawList, cfg, timeNow, dt)
       local f = cfg.anim.fadeOut and anim.fade(plate.lostAt, cfg.anim.fadeOutDur, timeNow) or 0
       if f <= 0 then
         plates[id] = nil
-      elseif plate.sx and not under_ui(cfg, plate.sx, plate.sy) then
-        plate.alpha = (plate.lossAlpha or 1) * f
-        jobs[#jobs + 1] = { plate = plate, castInfo = nil, isTarget = isTarget }
+      elseif plate.sx then
+        plate.aeAmt = anim.approach(plate.aeAmt or 0, 0, cfg.aehl.fadeSpeed, dt)
+        local hide, hits, bbox = occlusion(cfg, plate, false)
+        if not hide then
+          plate.alpha = (plate.lossAlpha or 1) * f
+          jobs[#jobs + 1] = { plate = plate, castInfo = nil, isTarget = isTarget,
+                              hits = hits, bbox = bbox }
+        end
       end
     end
   end
@@ -239,7 +303,18 @@ local function draw_plates(drawList, cfg, timeNow, dt)
     return (a2.plate.dist or 0) > (b2.plate.dist or 0)         -- farthest first
   end)
   for _, job in ipairs(jobs) do
-    render.plate(drawList, cfg, job.plate, job.castInfo, timeNow, job.isTarget)
+    if job.hits then
+      -- punch the overlapping window rects out of the plate's bbox and draw
+      -- once per leftover piece, clip-rect'd to it - the plate visually
+      -- passes UNDER the native EQ UI (same trick as indicators/)
+      for _, sub in ipairs(uirects.subtract(job.bbox, job.hits, 16)) do
+        drawList:PushClipRect(ImVec2(sub[1], sub[2]), ImVec2(sub[3], sub[4]), false)
+        render.plate(drawList, cfg, job.plate, job.castInfo, timeNow, job.isTarget)
+        drawList:PopClipRect()
+      end
+    else
+      render.plate(drawList, cfg, job.plate, job.castInfo, timeNow, job.isTarget)
+    end
   end
 end
 
@@ -266,7 +341,8 @@ local function draw()
           local fg = ImGui.GetForegroundDrawList()
           for n, rect in ipairs(uiRects) do
             fg:AddRect(ImVec2(rect[1], rect[2]), ImVec2(rect[3], rect[4]), 0xffff00ff, 0, 0, 2.0)
-            fg:AddText(ImVec2(rect[1] + 3, rect[2] + 3), 0xffff00ff, '#' .. n)
+            fg:AddText(ImVec2(rect[1] + 3, rect[2] + 3), 0xffff00ff,
+                       '#' .. n .. (rect.name and (' ' .. rect.name) or ''))
           end
         end
       end)
@@ -327,7 +403,31 @@ mq.bind('/npdebug', function()
   log.Info('occlusion source: %s | %s',
            uirects.native and 'NATIVE (named exports)' or 'TLO window scan',
            #names > 0 and table.concat(names, ', ') or '(none)')
+  local sn, sf, sx = eqgfx.ui_stats()
+  if sn then
+    log.Info('ui sweep: %d candidate names -> %d rects, %d probe faults%s', sn, sf, sx,
+             sx > 0 and '  <- export/ABI mismatch, occlusion is broken!' or '')
+  else
+    log.Info('ui sweep stats unavailable (old eqgfx.dll loaded - restart EQ)')
+  end
+  local D = uirects.debug
+  log.Info('ui map: raw=%d kept=%d anchor(EQMainWnd)=%s screen=%sx%s o=(%.0f,%.0f) k=(%.3f,%.3f)',
+           D.raw, D.kept, tostring(D.anchored), tostring(D.sw), tostring(D.sh),
+           D.ox, D.oy, D.kx, D.ky)
+  if D.firstRaw then
+    log.Info('ui map: first raw rect = %.0f,%.0f .. %.0f,%.0f (scan units, pre-map)',
+             D.firstRaw[1], D.firstRaw[2], D.firstRaw[3], D.firstRaw[4])
+  end
   log.Info('use /npui show to draw detected occluder rects on screen')
+  local sts = ae.states(settings.data or {}, mq.TLO.Me.X() or 0, mq.TLO.Me.Y() or 0, mq.TLO.Me.Z() or 0)
+  if #sts > 0 then
+    for _, st in ipairs(sts) do
+      log.Info('AE area in flight: %s %s marks %s plates%s', st.kind, tostring(st.shape),
+               st.marks, st.groupOnly and ' (my group only)' or '')
+    end
+  else
+    log.Info('AE highlight: idle (no area casts in flight)')
+  end
 end)
 
 mq.bind('/npui', function(...)
@@ -480,13 +580,15 @@ end
 
 -- Only real creatures get plates. The plain radius spawn search also returns
 -- auras, campfires, banners, totems, corpses, traps... - all filtered here.
+-- Also returns the spawn category (the AE highlight's eligibility key).
 local function allowed(cfg, spawn, id, myID)
-  if id == myID then return cfg.show.self end
+  if id == myID then return cfg.show.self, 'pc' end
   local t = spawn.Type()
-  if t == 'NPC' then return cfg.show.npcs end
-  if t == 'PC'  then return cfg.show.pcs end
-  if t == 'Pet' or t == 'Mercenary' then return cfg.show.pets end
-  return false
+  if t == 'NPC' then return cfg.show.npcs, 'npc' end
+  if t == 'PC'  then return cfg.show.pcs, 'pc' end
+  if t == 'Pet'       then return cfg.show.pets, 'pet' end
+  if t == 'Mercenary' then return cfg.show.pets, 'merc' end
+  return false, 'other'
 end
 
 local function discover()
@@ -509,7 +611,8 @@ local function discover()
     local spawn = mq.TLO.NearestSpawn(string.format('%d, %s', i, spec))
     if spawn() and spawn.X() then
       local id = spawn.ID()
-      if allowed(cfg, spawn, id, myID) then
+      local allow, kind = allowed(cfg, spawn, id, myID)
+      if allow then
         present[id] = true
         local plate = plates[id]
         if plate then
@@ -519,6 +622,7 @@ local function discover()
                               (spawn.PctHPs() or 0) / 100, animNow)
           plates[id] = plate
         end
+        plate.kind    = kind
         plate.isSelf  = (id == myID)
         plate.inGroup = groupIDs[id] or false
         if plate.isPC == nil then

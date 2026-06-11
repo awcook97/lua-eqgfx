@@ -21,4 +21,17 @@ T.TargetType = {
   FreeTarget      = 45,  AreaDetrimental = 50,
 }
 
+-- Where each area target type anchors its footprint (how the client resolves
+-- the AE center). Shared by indicators (area drawing) and nameplates (AE
+-- cast highlight) so both always agree on the same shapes.
+local TT = T.TargetType
+T.CasterCentered = {
+  [TT.PBAE]=true, [TT.AEPC_v1]=true, [TT.Group_v1]=true, [TT.AEPC_v2]=true,
+  [TT.Group_v2]=true, [TT.CasterAreaPC]=true, [TT.CasterAreaNPC]=true,
+}
+T.TargetCentered = {
+  [TT.TargetArea]=true, [TT.AreaDetrimental]=true, [TT.TargetAEDrain]=true,
+  [TT.TargetAEUndead]=true, [TT.TargetAESummoned]=true, [TT.FreeTarget]=true,
+}
+
 return T

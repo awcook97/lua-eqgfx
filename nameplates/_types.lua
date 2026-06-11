@@ -8,6 +8,10 @@ local T = {}
 T.NamePosition = { ABOVE = 1, BELOW = 2, INSIDE = 3, HIDDEN = 4 }
 T.NamePositionLabels = { 'Above bar', 'Below bar', 'Inside bar', 'Hidden' }
 
+---@enum UiOccludeMode  what happens to plates behind open EQ windows
+T.UiOccludeMode = { CLIP = 1, HIDE = 2 }
+T.UiOccludeModeLabels = { 'Clip (plates pass under windows)', 'Hide whole plate' }
+
 ---@enum BarTexture  procedural fill styles for HP + cast bars
 T.BarTexture = { FLAT = 1, GRADIENT = 2, GLASS = 3, STRIPES = 4, SEGMENTS = 5 }
 T.BarTextureLabels = { 'Flat', 'Gradient', 'Glass', 'Stripes', 'Segmented' }
@@ -80,6 +84,10 @@ T.ResScopeLabels = { 'Off', 'Self only', 'Self + group', 'All PCs', 'Everything'
 ---@field isPC boolean|nil    spawn type PC?
 ---@field isSelf boolean|nil  this is my own plate
 ---@field inGroup boolean|nil spawn is in my group
+---@field kind string|nil     spawn category: 'npc'|'pc'|'pet'|'merc'|'other'
+---@field aeKind string|nil   'det'|'ben' while AE casts mark this plate (lingers through the fade)
+---@field aeAmt number|nil    smoothed AE highlight amount 0..1 (stack alpha curve)
+---@field ext number[]|nil    drawn extents last frame, relative to sx/sy: {left, top, right, bottom}
 ---@field cls string|nil      class name (PC anonymization)
 ---@field clsShort string|nil class short name
 ---@field mana number|nil     0..1 when the mana bar applies

@@ -3,7 +3,7 @@
   AE caster indicator feature.
 ]]
 
-local TT = require('eqgfx.core._types').TargetType
+local core = require('eqgfx.core._types')
 
 ---@class ActiveCast
 ---@field id integer          caster spawn ID
@@ -19,14 +19,9 @@ local TT = require('eqgfx.core._types').TargetType
 
 local T = {}
 
-T.CASTER_CENTERED = {
-  [TT.PBAE]=true, [TT.AEPC_v1]=true, [TT.Group_v1]=true, [TT.AEPC_v2]=true,
-  [TT.Group_v2]=true, [TT.CasterAreaPC]=true, [TT.CasterAreaNPC]=true,
-}
-
-T.TARGET_CENTERED = {
-  [TT.TargetArea]=true, [TT.AreaDetrimental]=true, [TT.TargetAEDrain]=true,
-  [TT.TargetAEUndead]=true, [TT.TargetAESummoned]=true, [TT.FreeTarget]=true,
-}
+-- The category sets live in core/_types.lua (shared with the nameplates AE
+-- cast highlight); these aliases keep the established local names.
+T.CASTER_CENTERED = core.CasterCentered
+T.TARGET_CENTERED = core.TargetCentered
 
 return T

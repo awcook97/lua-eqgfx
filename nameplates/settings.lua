@@ -16,7 +16,8 @@ local types = require('eqgfx.nameplates._types')
 local DEFAULTS = {
   enabled     = true,
   radius      = 200,
-  hideUnderUI = true,   -- hide plates that would overlap open EQ windows
+  hideUnderUI = true,   -- occlude plates behind open EQ windows
+  uiOccludeMode = types.UiOccludeMode.CLIP,  -- clip plates around windows, or hide them whole
   extraWindows = {},    -- additional EQ window names for occlusion (/npui add)
 
   -- Which spawn TYPES get plates. Auras, objects, totems, corpses, traps and
@@ -124,6 +125,22 @@ local DEFAULTS = {
     glow            = true,  -- force border glow on the target
   },
 
+  aehl = {               -- highlight plates that in-flight AE casts will affect
+    enabled     = true,
+    fromMe      = true,  -- my own casts
+    fromPCs     = true,  -- other players (and their pets/mercs)
+    fromNPCs    = true,  -- NPC casts (mark PC plates - the "move!" cue)
+    tintBar     = true,  strength    = 0.65,  -- HP fill lerp toward the AE color
+    tintBorder  = true,
+    glow        = true,  -- pulsing rings around marked plates
+    pulse       = true,  pulseSpeed  = 1.2,   pulseAmount = 0.35,  -- Hz, depth
+    fadeSpeed   = 8.0,   -- highlight fade in/out speed (per second)
+    -- overlapping areas deepen the highlight: alpha = base + step*(count-1)
+    stackBase   = 0.5,   -- one AE
+    stackStep   = 0.1,   -- each additional AE
+    stackMax    = 5,     -- count cap (5 -> 0.9 with the defaults)
+  },
+
   anim = {
     -- event-driven
     hpSmoothing    = true,  hpSpeed        = 10.0,
@@ -163,6 +180,8 @@ local DEFAULTS = {
     castBack      = { 0.08, 0.08, 0.08, 0.85 },
     castText      = { 1.00, 1.00, 1.00, 1.00 },
     castInterrupt = { 1.00, 0.20, 0.20, 0.90 },
+    aeDet         = { 1.00, 0.55, 0.10, 1.00 },   -- my detrimental AE will hit this spawn
+    aeBen         = { 0.45, 0.80, 1.00, 1.00 },   -- my beneficial AE will help this spawn
   },
 }
 

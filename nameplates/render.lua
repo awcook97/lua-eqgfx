@@ -6,7 +6,10 @@
   every other ImGui window). That window context is also what lets us draw
   real spell icons via mq.FindTextureAnimation + ImGui.DrawTextureAnimation.
   NOTE: EQ's own windows are drawn by the game before MQ's ImGui overlay, so
-  nothing here can render beneath native EQ UI.
+  plates can never truly render beneath native EQ UI - instead init.lua
+  clip-rects plate drawing around the native window rects (uirects), which
+  looks identical. To support that, R.plate records the actual drawn extents
+  into plate.ext each frame (geom envelope + text/cast-bar widths).
 
   Animation kinds:
     event-driven : fade in/out, appear pop, damage flash, cast pulses
@@ -547,12 +550,17 @@ end
 -- Cast bar under the plate stack.
 ----------------------------------------------------------------------------
 ---@param castInfo CastInfo
-local function cast_bar(drawList, cfg, castInfo, cx, topY, w, alpha, timeNow, phase)
+local function cast_bar(drawList, cfg, castInfo, cx, geom, w, alpha, timeNow, phase)
   local castCfg, colors = cfg.castbar, cfg.colors
   local h  = castCfg.height
   local cw = w * castCfg.widthScale
   local x0, x1 = cx - cw * 0.5, cx + cw * 0.5
-  local y0, y1 = topY, topY + h
+  local y0 = geom.bottom + castCfg.gap
+  local y1 = y0 + h
+  geom.left   = math.min(geom.left, x0 - (castCfg.showIcon and castCfg.iconSize + 3 or 0))
+  geom.right  = math.max(geom.right, x1)
+  geom.bottom = math.max(geom.bottom, y1 + ((castCfg.showSpellName or castCfg.showTime)
+                                            and 1 + text_height(castCfg.textSize) or 0))
   -- cast math runs on the tracker's real clock (spell durations are wall
   -- seconds); visuals (sheen) stay on the frame timebase
   local castNow = casts.now()
@@ -595,6 +603,7 @@ local function cast_bar(drawList, cfg, castInfo, cx, topY, w, alpha, timeNow, ph
   local ts = castCfg.textSize
   if castCfg.showSpellName and castInfo.spellName then
     text(drawList, x0 + 1, ty, colors.castText, alpha, castInfo.spellName, ts)
+    geom.right = math.max(geom.right, x0 + 1 + text_width(castInfo.spellName, ts))
   end
   if castCfg.showTime and pct < 1 then
     local str
@@ -627,6 +636,7 @@ function R.plate(drawList, cfg, plate, castInfo, timeNow, isTarget)
   local h = cfg.bar.height * scale
   local cx = plate.sx or 0   -- guaranteed by callers; defaulted for the analyzer
   local cy = plate.sy or 0
+  local baseY = cy           -- plate.ext is recorded relative to (cx, baseY)
   if cfg.anim.bob then
     cy = cy + math.sin((timeNow + phase) * cfg.anim.bobSpeed * 2 * math.pi) * cfg.anim.bobAmount
   end
@@ -636,6 +646,20 @@ function R.plate(drawList, cfg, plate, castInfo, timeNow, isTarget)
   local borderC = (onTarget and targetCfg.border) and targetCfg.borderColor or colors.border
   local bt      = (onTarget and targetCfg.border) and targetCfg.borderThickness or cfg.bar.borderThickness
 
+  -- AE cast highlight: while my in-flight AE will affect this spawn, tint
+  -- toward the det/ben color. The amount is smoothed by init.lua; the pulse
+  -- is UNphased so every marked plate beats in sync and reads as one group.
+  local aehl = cfg.aehl
+  local aeC, aeAmt = nil, 0
+  if aehl.enabled and plate.aeKind and (plate.aeAmt or 0) > 0.01 then
+    aeC = (plate.aeKind == 'det') and colors.aeDet or colors.aeBen
+    aeAmt = plate.aeAmt or 0
+    if aehl.pulse then
+      aeAmt = aeAmt * (1 - aehl.pulseAmount + aehl.pulseAmount * hz_pulse(timeNow, aehl.pulseSpeed))
+    end
+    if aehl.tintBorder then borderC = anim.lerp_color(borderC, aeC, aeAmt) end
+  end
+
   -- pulsing outer glow rings (forced on for the target if configured)
   if cfg.anim.borderGlow or (onTarget and targetCfg.glow) then
     local glowC = onTarget and targetCfg.borderColor or colors.glow
@@ -644,6 +668,15 @@ function R.plate(drawList, cfg, plate, castInfo, timeNow, isTarget)
       local entry = bt + i * 2
       drawList:AddRect(ImVec2(x0 - entry, y0 - entry), ImVec2(x1 + entry, y1 + entry),
                  u32(glowC, alpha * cell / i), rnd + entry)
+    end
+  end
+
+  -- AE highlight glow rings (independent of the passive border glow)
+  if aeC and aehl.glow then
+    for i = 1, 2 do
+      local entry = bt + i * 2
+      drawList:AddRect(ImVec2(x0 - entry, y0 - entry), ImVec2(x1 + entry, y1 + entry),
+                 u32(aeC, alpha * aeAmt / i), rnd + entry)
     end
   end
 
@@ -657,6 +690,9 @@ function R.plate(drawList, cfg, plate, castInfo, timeNow, isTarget)
   if cfg.anim.lowHpPulse and plate.dispHp <= cfg.anim.lowHpThreshold then
     lowPulse = hz_pulse(timeNow, cfg.anim.lowHpSpeed, phase)
     fillC = anim.lerp_color(fillC, colors.lowHp, 0.35 + 0.45 * lowPulse)
+  end
+  if aeC and aehl.tintBar then
+    fillC = anim.lerp_color(fillC, aeC, aeAmt * aehl.strength)
   end
   fill_styled(drawList, cfg, x0, y0, x0 + w * plate.dispHp, y1, fillC, alpha, timeNow)
   segment_ticks(drawList, cfg, x0, y0, x1, y1, alpha)
@@ -702,20 +738,25 @@ function R.plate(drawList, cfg, plate, castInfo, timeNow, isTarget)
     local ts  = cfg.hp.textSize
     local HT  = types.HpTextPos
     local hpPos = cfg.hp.textPos
+    local tw = text_width(str, ts)
     local tx, ty
     if hpPos == HT.IN_LEFT then
       tx, ty = x0 + 2, cy - text_height(ts) * 0.5
     elseif hpPos == HT.IN_CENTER then
-      tx, ty = cx - text_width(str, ts) * 0.5, cy - text_height(ts) * 0.5
+      tx, ty = cx - tw * 0.5, cy - text_height(ts) * 0.5
     elseif hpPos == HT.IN_RIGHT then
-      tx, ty = x1 - text_width(str, ts) - 2, cy - text_height(ts) * 0.5
+      tx, ty = x1 - tw - 2, cy - text_height(ts) * 0.5
     elseif hpPos == HT.ABOVE then
       ty = geom.top - text_height(ts) - 1
-      tx = cx - text_width(str, ts) * 0.5
+      tx = cx - tw * 0.5
       geom.top = ty
     else -- BELOW
-      tx, ty = cx - text_width(str, ts) * 0.5, geom.bottom
+      tx, ty = cx - tw * 0.5, geom.bottom
       geom.bottom = geom.bottom + text_height(ts) + 1
+    end
+    if hpPos == HT.ABOVE or hpPos == HT.BELOW then
+      geom.left  = math.min(geom.left, tx)
+      geom.right = math.max(geom.right, tx + tw)
     end
     text(drawList, tx, ty, colors.hpText, alpha, str, ts)
   end
@@ -749,14 +790,21 @@ function R.plate(drawList, cfg, plate, castInfo, timeNow, isTarget)
       drawList:AddRectFilled(ImVec2(tx - pad, ty - pad), ImVec2(tx + tw2 + pad, ty + th2 + pad),
                        u32(colors.nameBg, nameA), 2)
     end
+    local bgPad = cfg.name.background and cfg.name.bgPadding or 0
+    geom.left  = math.min(geom.left, tx - bgPad)
+    geom.right = math.max(geom.right, tx + tw2 + bgPad)
     draw_name_text(drawList, cfg, colors, label, tx, ty, ts, nameC, nameA, timeNow, phase)
   end
 
   draw_buffs(drawList, cfg, plate, geom, alpha, isTarget, timeNow)
 
   if castInfo and cfg.castbar.show then
-    cast_bar(drawList, cfg, castInfo, cx, geom.bottom + cfg.castbar.gap, w, alpha, timeNow, phase)
+    cast_bar(drawList, cfg, castInfo, cx, geom, w, alpha, timeNow, phase)
   end
+
+  -- actual drawn footprint, relative to the projected anchor - init.lua uses
+  -- it next frame to occlude/clip the plate against native EQ window rects
+  plate.ext = { geom.left - cx, geom.top - baseY, geom.right - cx, geom.bottom - baseY }
 end
 
 return R
