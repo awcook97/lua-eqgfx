@@ -17,8 +17,6 @@ local eqgfx = require('eqgfx')
 ---@field rects number[][]   filtered {x0,y0,x1,y1} per visible window
 ---@field native boolean|nil nil until first fetch
 ---@field proven boolean     native has produced rects at least once
-
----@type UiRects
 local M = { rects = {}, native = nil, proven = false }
 
 -- Candidate names: the client window dump plus any user extras. Pushed to

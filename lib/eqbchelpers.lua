@@ -42,7 +42,7 @@ function helpers.query(peerName, query, timeout)
     return data
 end
 
-function helpers.GotResponse(line, sender, query, data)
+function helpers.GotResponse(_, sender, query, data)
     helpers.QueryMap[query][sender] = data
 end
 

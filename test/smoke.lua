@@ -15,7 +15,7 @@ local OCC = mode and mode:match('^occlude') and true or false
 -- deterministic, always-advancing clock so timed gates (scan cadence,
 -- discovery cadence) fire during the 3 simulated loop ticks
 local t0 = 0
-os.clock = function() t0 = t0 + 0.05; return t0 end
+rawset(os, 'clock', function() t0 = t0 + 0.05; return t0 end)
 package.path = root .. '/../?.lua;' .. root .. '/../?/init.lua;' .. package.path
 
 -- ===== universal TLO proxy: any member chain, calls return nil =====
@@ -41,8 +41,8 @@ local loops = 0
 local mqstub = {
   configDir = tmp,
   TLO = proxy(),
-  imgui = { init = function(name, fn) draws[#draws + 1] = fn end },
-  event = function(name, pat, fn, opts)
+  imgui = { init = function(_, fn) draws[#draws + 1] = fn end },
+  event = function(name)
     assert(not events[name], 'duplicate event name: ' .. name)
     events[name] = true
   end,

@@ -144,9 +144,10 @@ end
 ---@field ui_native boolean|nil  native window enumeration available
 ---@field dll_stale boolean|nil  loaded DLL predates the one on disk
 ---@field TargetType table<string, integer>
-
----@type Eqgfx|table
 local M = {}
+
+-- scalar cdata fields read back as plain Lua numbers
+---@type { targetType: integer, range: number, aeRange: number, coneStart: number, coneEnd: number }
 local geom = ffi.new('eqgfx_spell_geom')
 
 -- The pinst* symbols hold the ADDRESS OF the instance pointer slot, not the
@@ -306,7 +307,6 @@ end
 -- or nil if the spell wasn't found.
 function M.spell_geom(spellID)
   if lib.eqgfx_get_spell_geom(spellID, geom) == 0 then return nil end
-  ---@diagnostic disable
   return {
     targetType = geom.targetType,
     range      = geom.range,
@@ -315,7 +315,6 @@ function M.spell_geom(spellID)
     coneEnd    = geom.coneEnd,
   }
 end
----@diagnostic enable
 
 -- Color helpers. Engine RGB byte order is unverified; if colors look wrong
 -- in-game, switch argb -> abgr and we'll lock it down.

@@ -24,7 +24,7 @@ local function u32(c) return ImGui.ColorConvertFloat4ToU32({ c[1], c[2], c[3], c
 R.u32 = u32
 
 local function cols_for(cat)
-  local C = settings.data.colors
+  local C = (settings.data or {}).colors
   if     cat == 'self'   then return u32(C.selfFill),   u32(C.selfLine)
   elseif cat == 'friend' then return u32(C.friendFill), u32(C.friendLine)
   else                        return u32(C.enemyFill),  u32(C.enemyLine) end
@@ -110,13 +110,13 @@ local function fill_quad(drawList, activeCast, b, c, d, fillCol, lineCol)
 end
 
 local function spawn_ground(spawn)
-  return spawn.X(), spawn.Y(), spawn.Z() - settings.data.groundOffset
+  return spawn.X(), spawn.Y(), spawn.Z() - (settings.data or {}).groundOffset
 end
 
 -- Draw one active cast's area / line.
----@param a ActiveCast
+---@param activeCast ActiveCast
 function R.draw_active(drawList, activeCast)
-  local cfg = settings.data
+  local cfg = settings.data or {}
   local spawn = mq.TLO.Spawn(activeCast.id)
   if not (spawn() and spawn.X()) then return end
 
@@ -187,7 +187,7 @@ end
 
 -- Cyan reference ring around the player (toggled from the menu / /aering).
 function R.draw_debug_ring(drawList)
-  local cfg = settings.data
+  local cfg = settings.data or {}
   local me = mq.TLO.Me
   local x, y, z = me.X(), me.Y(), me.Z()
   if x then

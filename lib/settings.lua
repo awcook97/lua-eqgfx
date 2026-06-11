@@ -164,7 +164,7 @@ M.merge_defaults = merge_defaults
 ---@field section string
 ---@field defaults table
 ---@field legacy string|nil
----@field data table|nil      live settings (after load)
+---@field data table          live settings (defaults until load() merges files)
 ---@field scope string        'char' | 'server' | 'global'
 ---@field load fun(): table
 ---@field save fun(log?: table): boolean
@@ -179,9 +179,11 @@ function M.new(opts)
     section  = assert(opts.section, 'settings store needs a section name'),
     defaults = assert(opts.defaults, 'settings store needs defaults'),
     legacy   = opts.legacy,     -- optional old single-file config to import
-    data     = nil,
     scope    = 'char',
   }
+  -- defaults live immediately so .data is never nil; load() swaps in the
+  -- merged on-disk values
+  self.data = merge_defaults({}, self.defaults)
   local dirty = false
 
   function self.load()

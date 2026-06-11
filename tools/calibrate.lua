@@ -74,7 +74,6 @@ end)
 log.Info('running. Stand still, then: /eqdump  and paste the output.')
 
 local MAGENTA = eqgfx.argb(255, 255, 0, 255)
-local GREEN   = eqgfx.argb(255, 0, 255, 0)
 local last    = os.clock()
 
 local function box(cx, cy, half, color)

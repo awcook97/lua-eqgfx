@@ -332,6 +332,7 @@ local function draw_name_text(drawList, cfg, colors, label, tx, ty, ts, baseC, a
 
   local spd = cfg.name.animSpeed
   local amp = cfg.name.animAmount
+  timeNow = timeNow + phase   -- de-sync name anims between plates, same as sheen/breathe
   local n = #label
   local x = tx
   local reveal = nil
@@ -382,7 +383,8 @@ end
 -- Open the in-game Spell Display window by "clicking" a generated link.
 local function inspect_spell(spellID)
   pcall(function()
-    local link = mq.FormatSpellLink(mq.TLO.Spell(spellID))
+    local spell = mq.TLO.Spell(spellID) --[[@as spell]]   -- narrow the TLO union
+    local link = mq.FormatSpellLink(spell)
     local links = mq.ExtractLinks(link)
     if links and links[1] then mq.ExecuteTextLink(links[1]) end
   end)
@@ -544,7 +546,7 @@ end
 ----------------------------------------------------------------------------
 -- Cast bar under the plate stack.
 ----------------------------------------------------------------------------
----@param ci CastInfo
+---@param castInfo CastInfo
 local function cast_bar(drawList, cfg, castInfo, cx, topY, w, alpha, timeNow, phase)
   local castCfg, colors = cfg.castbar, cfg.colors
   local h  = castCfg.height
@@ -605,8 +607,8 @@ end
 ----------------------------------------------------------------------------
 -- One plate, centered on p.sx/p.sy.
 ----------------------------------------------------------------------------
----@param p Plate
----@param ci CastInfo|nil
+---@param plate Plate
+---@param castInfo CastInfo|nil
 ---@param isTarget boolean|nil
 function R.plate(drawList, cfg, plate, castInfo, timeNow, isTarget)
   local colors = cfg.colors
@@ -683,11 +685,11 @@ function R.plate(drawList, cfg, plate, castInfo, timeNow, isTarget)
 
   -- thin mana / endurance bars directly under the HP bar
   local RH = cfg.resources.height
-  local function res_bar(pct, fillC)
+  local function res_bar(pct, resC)
     local ry = geom.bottom
     drawList:AddRectFilled(ImVec2(x0, ry), ImVec2(x1, ry + RH), u32(colors.resourceBack, alpha), rnd * 0.5)
     drawList:AddRectFilled(ImVec2(x0, ry), ImVec2(x0 + w * anim.clamp01(pct), ry + RH),
-                     u32(fillC, alpha), rnd * 0.5)
+                     u32(resC, alpha), rnd * 0.5)
     drawList:AddRect(ImVec2(x0, ry), ImVec2(x1, ry + RH), u32(borderC, alpha * 0.8), rnd * 0.5)
     geom.bottom = ry + RH + 1
   end

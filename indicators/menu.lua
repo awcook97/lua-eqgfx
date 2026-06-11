@@ -12,7 +12,7 @@ function M.toggle() M.open = not M.open end
 local function mark() settings.mark_dirty() end
 
 local function check(label, key)
-  local cfg = settings.data
+  local cfg = settings.data or {}
   local v, pressed = ImGui.Checkbox(label, cfg[key])
   if pressed then cfg[key] = v; mark() end
 end
@@ -25,26 +25,26 @@ local function to_color(colorVal)
 end
 
 local function color(label, key)
-  local cfg = settings.data
+  local cfg = settings.data or {}
   local colorVal, changed = ImGui.ColorEdit4(label, cfg.colors[key])
   if changed then cfg.colors[key] = to_color(colorVal); mark() end
 end
 
 local function slideri(label, key, lo, hi)
-  local cfg = settings.data
+  local cfg = settings.data or {}
   local v, changed = ImGui.SliderInt(label, cfg[key], lo, hi)
   if changed then cfg[key] = v; mark() end
 end
 
 local function sliderf(label, key, lo, hi)
-  local cfg = settings.data
+  local cfg = settings.data or {}
   local v, changed = ImGui.SliderFloat(label, cfg[key], lo, hi, '%.1f')
   if changed then cfg[key] = v; mark() end
 end
 
 function M.draw()
   if not M.open then return end
-  local cfg = settings.data
+  local cfg = settings.data or {}
   local open, show = ImGui.Begin('EQGFX Spell Indicators', M.open)
   M.open = open
   if show then

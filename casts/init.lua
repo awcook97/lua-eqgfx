@@ -26,12 +26,18 @@ local CAST_ANIMS = types.CAST_ANIMS
 
 local M = { CAST_ANIMS = CAST_ANIMS }
 
+---@class CastTrackerCfg
+---@field log table|nil          lwlogger-style module (Info/Warn/Debug)
+---@field trackSelf boolean      include your own casts (via Me.Casting)
+---@field interruptDetect boolean drop NPC casts whose cast animation stops early
+---@field grace number           seconds a finished cast lingers (finish pulses)
+---@field interruptLinger number seconds an interrupted cast lingers (fade-outs)
 local trackerCfg = {
-  log             = nil,    -- lwlogger-style module (Info/Warn/Debug)
-  trackSelf       = true,   -- include your own casts (via Me.Casting)
-  interruptDetect = true,   -- drop NPC casts whose cast animation stops early
-  grace           = 1.0,    -- seconds a finished cast lingers (finish pulses)
-  interruptLinger = 0.8,    -- seconds an interrupted cast lingers (fade-outs)
+  log             = nil,
+  trackSelf       = true,
+  interruptDetect = true,
+  grace           = 1.0,
+  interruptLinger = 0.8,
 }
 
 local active        = {}   -- spawnID -> CastInfo
@@ -231,8 +237,8 @@ function M.get(spawnID) return active[spawnID] end
 function M.all() return active end
 
 -- Progress of a cast: fraction 0..1 (clamped) and seconds remaining (>= 0).
----@param ci CastInfo
----@param now number
+---@param castInfo CastInfo
+---@param timeNow number
 ---@return number pct, number remain
 function M.progress(castInfo, timeNow)
   local elapsed = timeNow - castInfo.startedAt

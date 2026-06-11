@@ -80,7 +80,7 @@ mq.event('eqgfx_cast_in', "#*#eqgfx_cast=#1#=#2#=#3##*#", function(_, cid, sid, 
   if not activeCast then
     -- caster may be out of our detection range; build a stub from the broadcast.
     activeCast = { id = cid, spellID = (sid and sid > 0) and sid or nil, name = '?',
-          isSelf = false, friend = false, stub = true,
+          isSelf = false, friend = false, stub = true, castStart = casts.now(),
           expireAt = casts.now() + casts.cast_seconds(sid) + 1 }
     activeCast.geom = activeCast.spellID and eqgfx.spell_geom(activeCast.spellID) or nil
     active[cid] = activeCast
@@ -96,7 +96,7 @@ end)
 local canClip   -- PushClipRect capability, probed once
 
 local function draw_all(drawList)
-  if settings.data.showDebugRing then render.draw_debug_ring(drawList) end
+  if (settings.data or {}).showDebugRing then render.draw_debug_ring(drawList) end
   for _, activeCast in pairs(active) do
     render.draw_active(drawList, activeCast)
   end
@@ -137,20 +137,20 @@ mq.imgui.init('eqgfx_indicators', draw)
 ----------------------------------------------------------------------------
 mq.bind('/aemenu', function() menu.toggle() end)
 mq.bind('/aering', function(rect)
-  local cfg = settings.data
+  local cfg = settings.data or {}
   if rect and rect ~= '' then cfg.debugRadius = tonumber(rect) or cfg.debugRadius end
   cfg.showDebugRing = not cfg.showDebugRing
   settings.mark_dirty()
   log.Info('debug ring = %s (radius %g)', tostring(cfg.showDebugRing), cfg.debugRadius)
 end)
 mq.bind('/aerad', function(rect)
-  local cfg = settings.data
+  local cfg = settings.data or {}
   cfg.debugRadius = tonumber(rect) or cfg.debugRadius
   settings.mark_dirty()
   log.Info('debug ring radius = %g', cfg.debugRadius)
 end)
 mq.bind('/aez', function(z)
-  local cfg = settings.data
+  local cfg = settings.data or {}
   cfg.groundOffset = tonumber(z) or cfg.groundOffset
   settings.mark_dirty()
   log.Info('ground offset = %g', cfg.groundOffset)

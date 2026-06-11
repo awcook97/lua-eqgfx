@@ -8,7 +8,7 @@ local TT = require('eqgfx.core._types').TargetType
 ---@class ActiveCast
 ---@field id integer          caster spawn ID
 ---@field spellID integer|nil
----@field castStart number    tracker startedAt (change detection)
+---@field castStart number|nil  tracker startedAt (change detection; nil on EQBC stubs)
 ---@field geom SpellGeom|nil
 ---@field name string
 ---@field isSelf boolean

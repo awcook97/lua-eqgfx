@@ -56,9 +56,10 @@ if eqgfx.dll_stale then
 end
 
 settings.load()
-uirects.add_names(settings.data.extraWindows)
+local bootCfg = settings.data or {}
+uirects.add_names(bootCfg.extraWindows)
 casts.init{ log = log, trackSelf = true,
-            interruptDetect = settings.data.castbar.interruptDetect }
+            interruptDetect = bootCfg.castbar.interruptDetect }
 
 ---@type table<integer, Plate>
 local plates = {}
@@ -245,7 +246,7 @@ end
 local function draw()
   animNow = animNow + FRAME_DT
   local timeNow, dt = animNow, FRAME_DT
-  local cfg = settings.data
+  local cfg = settings.data or {}
 
   if cfg.enabled then
     -- Fullscreen pass-through window at the BACK of the ImGui window stack:
@@ -257,7 +258,7 @@ local function draw()
     ImGui.SetNextWindowSize(sw, sh)
     local _, show = ImGui.Begin('##eqgfx_nameplates_overlay', true, OVERLAY_FLAGS)
     if show then
-      local okk, err = pcall(function()
+      local okk, drawErr = pcall(function()
         local drawList = ImGui.GetWindowDrawList()
         render.probe_caps(drawList)
         draw_plates(drawList, cfg, timeNow, dt)
@@ -271,7 +272,7 @@ local function draw()
       end)
       if not okk and not drawErrLogged then
         drawErrLogged = true
-        log.Error('draw error (plates disabled this frame): %s', tostring(err))
+        log.Error('draw error (plates disabled this frame): %s', tostring(drawErr))
       end
     end
     ImGui.End()
@@ -287,14 +288,16 @@ mq.imgui.init('eqgfx_nameplates', draw)
 ----------------------------------------------------------------------------
 mq.bind('/npmenu', function() menu.toggle() end)
 mq.bind('/npradius', function(n)
-  settings.data.radius = tonumber(n) or settings.data.radius
+  local cfg = settings.data or {}
+  cfg.radius = tonumber(n) or cfg.radius
   settings.mark_dirty()
-  log.Info('radius=%d', settings.data.radius)
+  log.Info('radius=%d', cfg.radius)
 end)
 mq.bind('/nppcs', function()
-  settings.data.show.pcs = not settings.data.show.pcs
+  local cfg = settings.data or {}
+  cfg.show.pcs = not cfg.show.pcs
   settings.mark_dirty()
-  log.Info('show PCs=%s', tostring(settings.data.show.pcs))
+  log.Info('show PCs=%s', tostring(cfg.show.pcs))
 end)
 
 mq.bind('/npdebug', function()
@@ -316,7 +319,7 @@ mq.bind('/npdebug', function()
   end
   log.Info('loaded eqgfx.dll build: %s', eqgfx.build and eqgfx.build() or '?')
   log.Info('flags: hideUnderUI=%s dll_stale=%s ui_native=%s findMode=%s uirects.native=%s liveRects=%d',
-           tostring(settings.data.hideUnderUI), tostring(eqgfx.dll_stale),
+           tostring((settings.data or {}).hideUnderUI), tostring(eqgfx.dll_stale),
            tostring(eqgfx.ui_native), tostring(eqgfx.ui_find_mode and eqgfx.ui_find_mode() or '?'),
            tostring(uirects.native), #uiRects)
   local names = {}
@@ -336,7 +339,7 @@ mq.bind('/npui', function(...)
   end
   if args[1] == 'add' and args[2] then
     local name = table.concat(args, ' ', 2)
-    table.insert(settings.data.extraWindows, name)
+    table.insert((settings.data or {}).extraWindows, name)
     uirects.add_names({ name })   -- pushed into the native scan's name list
     settings.mark_dirty()
     log.Info('occlusion window added: "%s"', name)
@@ -411,7 +414,7 @@ local function sort_buffs(lst)
 end
 
 local function refresh_buffs(plate, spawn, isSelf)
-  local buffCfg = settings.data.buffs
+  local buffCfg = (settings.data or {}).buffs
   local myName = mq.TLO.Me.CleanName() or ''
   local seen = {}   -- id -> addedAt from the previous scan (appear flash)
   for _, lst in ipairs({ plate.buffsB, plate.buffsD }) do
@@ -436,7 +439,7 @@ local function refresh_buffs(plate, spawn, isSelf)
     if dur and dur > 30000 then dur = math.floor(dur / 1000) end  -- ms -> s
     local entry = { id = id, icon = icon, ben = ben and true or false,
                 name = name, mine = (caster == myName),
-                caster = caster, dur = dur, addedAt = seen[id] or timeNow }
+                caster = caster, dur = dur, addedAt = seen[id] or animNow }
     if apply_buff_rules(buffCfg, entry) then
       if entry.ben then benefits[#benefits + 1] = entry else detriments[#detriments + 1] = entry end
     end
@@ -469,6 +472,8 @@ local function refresh_buffs(plate, spawn, isSelf)
       end
     end
   end
+  sort_buffs(benefits)
+  sort_buffs(detriments)
   plate.buffsB, plate.buffsD = benefits, detriments
 end
 
@@ -485,7 +490,7 @@ local function allowed(cfg, spawn, id, myID)
 end
 
 local function discover()
-  local cfg = settings.data
+  local cfg = settings.data or {}
   local myID = mq.TLO.Me.ID()
   local spec = 'radius ' .. cfg.radius
   local present = {}
@@ -539,7 +544,7 @@ end
 
 while true do
   mq.doevents()
-  local cfg = settings.data
+  local cfg = settings.data or {}
 
   casts.config{ interruptDetect = cfg.castbar.interruptDetect }
   casts.update()
