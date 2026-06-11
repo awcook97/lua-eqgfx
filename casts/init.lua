@@ -26,12 +26,14 @@ local CAST_ANIMS = types.CAST_ANIMS
 
 local M = { CAST_ANIMS = CAST_ANIMS }
 
+--- Tracker configuration. All fields are optional in init()/config() calls;
+--- the defaults below fill the gaps.
 ---@class CastTrackerCfg
----@field log table|nil          lwlogger-style module (Info/Warn/Debug)
----@field trackSelf boolean      include your own casts (via Me.Casting)
----@field interruptDetect boolean drop NPC casts whose cast animation stops early
----@field grace number           seconds a finished cast lingers (finish pulses)
----@field interruptLinger number seconds an interrupted cast lingers (fade-outs)
+---@field log table|nil # lwlogger-style module (Info/Warn/Debug); nil = silent
+---@field trackSelf boolean|nil # include your own casts (via Me.Casting)
+---@field interruptDetect boolean|nil # drop NPC casts whose cast animation stops early
+---@field grace number|nil # seconds a finished cast lingers (finish pulses)
+---@field interruptLinger number|nil # seconds an interrupted cast lingers (fade-outs)
 local trackerCfg = {
   log             = nil,
   trackSelf       = true,
@@ -49,6 +51,9 @@ local function dbg(fmt, ...)
   if trackerCfg.log then trackerCfg.log.Debug(fmt, ...) end
 end
 
+--- SpellIcon atlas cell for a spell, or nil when unknown.
+---@param spellID integer|nil
+---@return integer|nil icon # cell index in the A_SpellIcons atlas
 local function spell_icon(spellID)
   if not spellID then return nil end
   local ic = mq.TLO.Spell(spellID).SpellIcon()
@@ -56,6 +61,13 @@ local function spell_icon(spellID)
   return nil
 end
 
+--- Cast time of a spell in wall-clock seconds (3s fallback when unknown).
+---
+--- ```lua
+--- local dur = casts.cast_seconds(spellID)
+--- ```
+---@param spellID integer|nil
+---@return number seconds # MyCastTime, else CastTime, else 3
 local function cast_seconds(spellID)
   if not spellID then return 3 end
   local ms = mq.TLO.Spell(spellID).MyCastTime()
@@ -65,26 +77,34 @@ local function cast_seconds(spellID)
 end
 M.cast_seconds = cast_seconds
 
--- Resolve a caster name to its spawn, preferring one in a cast animation.
+--- Resolve a caster name to its spawn, preferring one in a cast animation
+--- (several spawns can share a name).
+---@param name string # clean caster name from the chat line
+---@return spawn|nil spawn # the spawn TLO, or nil when nothing matches
 local function resolve_caster(name)
   local cnt = mq.TLO.SpawnCount('npc ' .. name)() or 0
   local fallback = nil
   for i = 1, cnt do
-    local spawn = mq.TLO.NearestSpawn(string.format('%d, npc %s', i, name))
+    local spawn = mq.TLO.NearestSpawn(string.format('%d, npc %s', i, name)) --[[@as spawn]]
     if spawn() and spawn.ID() and spawn.ID() > 0 then
       if CAST_ANIMS[spawn.Animation()] then return spawn end
       fallback = fallback or spawn
     end
   end
   if fallback then return fallback end
-  local spawn = mq.TLO.Spawn('npc ' .. name)
+  local spawn = mq.TLO.Spawn('npc ' .. name) --[[@as spawn]]
   if spawn() and spawn.ID() and spawn.ID() > 0 then return spawn end
-  spawn = mq.TLO.Spawn('pc =' .. name)                 -- other players cast too
+  spawn = mq.TLO.Spawn('pc =' .. name) --[[@as spawn]] -- other players cast too
   if spawn() and spawn.ID() and spawn.ID() > 0 then return spawn end
   return nil
 end
 
--- Build + register an active cast for a resolved spawn.
+--- Build + register an active cast for a resolved spawn.
+---@param spawn spawn # spawn TLO of the caster
+---@param casterName string
+---@param spellID integer|nil
+---@param spellName string|nil
+---@param timeNow number # tracker clock (os.clock)
 local function activate(spawn, casterName, spellID, spellName, timeNow)
   local id = spawn.ID()
   local castInfo = types.CastInfo(id, casterName, spellID, spellName,
@@ -138,7 +158,20 @@ local function on_interrupt(name)
   pendingByName[name] = nil
 end
 
----@param opts table|nil  overrides for cfg fields (log, trackSelf, ...)
+--- Set up the tracker: registers the "begins to cast" / interrupt chat
+--- events (once) and applies config overrides. Cast detection rides on those
+--- events, so your main loop MUST call mq.doevents().
+---
+--- ```lua
+--- local casts = require('eqgfx.casts')
+--- casts.init{ trackSelf = true }
+--- while true do
+---   mq.doevents()
+---   casts.update()
+---   mq.delay(50)
+--- end
+--- ```
+---@param opts CastTrackerCfg|nil # overrides: log, trackSelf, interruptDetect, grace, interruptLinger
 function M.init(opts)
   if opts then for k, v in pairs(opts) do trackerCfg[k] = v end end
   if registered then return end
@@ -154,7 +187,12 @@ function M.init(opts)
   mq.event('eqgfx_casts_i4', "#1#'s #2# casting is interrupted#*#",  function(_, n) on_interrupt(n) end)
 end
 
--- Runtime toggles (settings menus call this).
+--- Change tracker config at runtime (settings menus call this every pass).
+---
+--- ```lua
+--- casts.config{ interruptDetect = cfg.castbar.interruptDetect }
+--- ```
+---@param opts table # any CastTrackerCfg fields to override
 function M.config(opts)
   for k, v in pairs(opts) do trackerCfg[k] = v end
 end
@@ -184,12 +222,20 @@ local function update_self(timeNow)
   end
 end
 
--- The cast tracker is the single place real time exists: spell durations
--- are wall-clock seconds, so progress/expiry need an actual clock.
+--- The tracker's clock. Spell durations are wall-clock seconds, so cast math
+--- (progress/expiry) must use THIS time base, not a frame counter.
+---
+--- ```lua
+--- local pct, remain = casts.progress(info, casts.now())
+--- ```
+---@return number now # os.clock() seconds
 function M.now()
   return os.clock()
 end
 
+--- Advance the tracker: pick up my own casts (Me.Casting), retry unresolved
+--- caster names, run interrupt detection, expire finished casts. Call once
+--- per main-loop pass, after mq.doevents().
 function M.update()
   local timeNow = os.clock()
   if trackerCfg.trackSelf then update_self(timeNow) end
@@ -230,16 +276,31 @@ function M.update()
   end
 end
 
----@return CastInfo|nil
+--- The active cast for one spawn, if any.
+---
+--- ```lua
+--- local info = casts.get(mq.TLO.Target.ID() or 0)
+--- if info and not info.interrupted then ... end
+--- ```
+---@param spawnID integer # caster spawn ID
+---@return CastInfo|nil castInfo # nil when that spawn isn't casting
 function M.get(spawnID) return active[spawnID] end
 
----@return table<integer, CastInfo>
+--- Every cast currently in flight, keyed by caster spawn ID. Includes
+--- recently finished/interrupted entries while they linger for fade-outs.
+---@return table<integer, CastInfo> active
 function M.all() return active end
 
--- Progress of a cast: fraction 0..1 (clamped) and seconds remaining (>= 0).
+--- Progress of a cast on the tracker clock.
+---
+--- ```lua
+--- local pct, remain = casts.progress(info, casts.now())
+--- bar_fill(pct); label(string.format('%.1fs', remain))
+--- ```
 ---@param castInfo CastInfo
----@param timeNow number
----@return number pct, number remain
+---@param timeNow number # casts.now() - NOT a frame counter
+---@return number pct # fraction 0..1, clamped
+---@return number remain # seconds remaining, >= 0
 function M.progress(castInfo, timeNow)
   local elapsed = timeNow - castInfo.startedAt
   local pct = (castInfo.duration > 0) and (elapsed / castInfo.duration) or 1

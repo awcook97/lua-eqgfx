@@ -17,6 +17,33 @@ local core = require('eqgfx.core._types')
 ---@field stub boolean|nil      built from an EQBC broadcast, not local detection
 ---@field expireAt number|nil   stubs only: when to drop the entry
 
+---@class IndicatorsColors   per-category area colors
+---@field enemyFill RGBA
+---@field enemyLine RGBA
+---@field friendFill RGBA
+---@field friendLine RGBA
+---@field selfFill RGBA
+---@field selfLine RGBA
+---@field line RGBA # single-target caster->target line
+---@field debugFill RGBA
+---@field debugLine RGBA
+
+---@class IndicatorsConfig   the whole settings tree (defaults in settings.lua)
+---@field showEnemies boolean
+---@field showFriendly boolean
+---@field showSelf boolean
+---@field showAoE boolean # caster-centered circles (PBAE etc.)
+---@field showCones boolean
+---@field showBeams boolean
+---@field showTargetAoE boolean # target-centered circles
+---@field showLines boolean # single-target caster->target lines
+---@field showDebugRing boolean
+---@field genericMarker boolean # marker when the spell can't be identified
+---@field radius number # cast detection radius, world units
+---@field groundOffset number # how far below reported Z to draw areas
+---@field debugRadius number # /aering ring radius
+---@field colors IndicatorsColors
+
 local T = {}
 
 -- The category sets live in core/_types.lua (shared with the nameplates AE

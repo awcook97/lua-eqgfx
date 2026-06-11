@@ -1,0 +1,45 @@
+# Updates the RedGuides resource whenever a v* tag is pushed:
+#   git tag v1.0.1 && git push origin v1.0.1
+# The tag name becomes the version / update title, the newest CHANGELOG.md
+# entry becomes the update message, README.md becomes the overview, and the
+# zip is attached as the release file.
+#
+# One-time setup:
+#   - create the resource on RedGuides by hand, put its numeric ID below
+#   - add your RedGuides API key (account security page) as the
+#     REDGUIDES_API_KEY secret in the repo settings
+
+name: Publish to RedGuides
+
+on:
+  push:
+    tags: [ "v*" ]
+
+jobs:
+  redfetch-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          path: eqgfx
+
+      - name: Build Zip File
+        # ship only what runs in-game: no screenshots, tests, CI or dotfiles
+        run: >
+          zip -r eqgfx.zip eqgfx
+          -x "eqgfx/.git/*" "eqgfx/.github/*" "eqgfx/.claude/*"
+          "eqgfx/assets/*" "eqgfx/test/*" "eqgfx/docs/hidden/*"
+          "eqgfx/.gitignore" "eqgfx/.luarc.json"
+
+      - name: Publish to RedGuides
+        uses: RedGuides/redguides-publish@v1
+        env:
+          REDGUIDES_API_KEY: ${{ secrets.REDGUIDES_API_KEY }}
+        with:
+          resource_id: 'FILL_ME_IN'   # numbers at the end of the resource URL
+          description: 'eqgfx/README.md'
+          version: '${{ github.ref_name }}'
+          message: 'eqgfx/CHANGELOG.md'
+          file: 'eqgfx.zip'
+          domain: 'https://raw.githubusercontent.com/awcook97/lua-eqgfx/main/'

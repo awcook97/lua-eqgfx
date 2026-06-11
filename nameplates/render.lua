@@ -51,6 +51,16 @@ local R = {}
 ---@type RenderCaps
 R.caps = { sizedText = nil, multiColor = nil, clipRect = nil, iconDraw = nil }
 
+--- Probe the optional ImGui binding features once (first frame) - sized
+--- text, multi-color rects, clip rects. Every later draw checks R.caps and
+--- degrades per-feature instead of crashing on an older MQ build.
+---
+--- ```lua
+--- local drawList = ImGui.GetWindowDrawList()
+--- render.probe_caps(drawList)
+--- if render.caps.clipRect then drawList:PushClipRect(...) end
+--- ```
+---@param drawList ImDrawList # any ImGui draw list
 function R.probe_caps(drawList)
   if R.caps.sizedText ~= nil then return end
   R.caps.sizedText = pcall(function()
@@ -67,11 +77,19 @@ function R.probe_caps(drawList)
   -- iconDraw probed lazily on the first real icon (needs a live animation)
 end
 
+--- Settings color ({r,g,b,a} floats) -> ImGui packed u32, with an optional
+--- extra alpha multiplier (the per-plate fade).
+---@param c number[] # {r,g,b,a} floats 0..1
+---@param alphaMult number|nil # multiplied into alpha (default 1)
+---@return integer u32
 local function u32(c, alphaMult)
   return ImGui.ColorConvertFloat4ToU32({ c[1], c[2], c[3], c[4] * (alphaMult or 1) })
 end
 
--- f > 1 lightens toward white, f < 1 darkens toward black.
+--- Shade a color: f > 1 lightens toward white, f < 1 darkens toward black.
+---@param c number[] # {r,g,b,a}
+---@param f number # shade factor
+---@return number[] shaded # new {r,g,b,a}
 local function shade(c, f)
   if f >= 1 then
     local t = f - 1
@@ -80,6 +98,15 @@ local function shade(c, f)
   return { c[1] * f, c[2] * f, c[3] * f, c[4] }
 end
 
+--- Draw text at an optional pixel size (falls back to the default font size
+--- when the binding can't size text - check R.caps.sizedText).
+---@param drawList ImDrawList
+---@param x number # screen X
+---@param y number # screen Y
+---@param c number[] # {r,g,b,a} color
+---@param alphaMult number|nil # extra alpha multiplier
+---@param str string
+---@param size number|nil # font pixel size (needs caps.sizedText)
 local function text(drawList, x, y, c, alphaMult, str, size)
   if R.caps.sizedText and size then
     drawList:AddText(ImGui.GetFont(), size, ImVec2(x, y), u32(c, alphaMult), str)
@@ -88,6 +115,10 @@ local function text(drawList, x, y, c, alphaMult, str, size)
   end
 end
 
+--- Width of a string as text() will draw it (scaled when sized text works).
+---@param str string
+---@param size number|nil # font pixel size
+---@return number px
 local function text_width(str, size)
   local w = ImGui.CalcTextSize(str)
   if R.caps.sizedText and size then
@@ -97,11 +128,19 @@ local function text_width(str, size)
   return w
 end
 
+--- Height of a line as text() will draw it.
+---@param size number|nil # font pixel size
+---@return number px
 local function text_height(size)
   if R.caps.sizedText and size then return size end
   return ImGui.GetFontSize() or 13
 end
 
+--- HP fill color for a fraction: the low->mid->high gradient, or the fixed
+--- bar color when the gradient is off.
+---@param cfg NameplatesConfig # nameplates settings
+---@param plate number # HP fraction 0..1
+---@return number[] color # {r,g,b,a}
 local function hp_color(cfg, plate)
   if not cfg.hp.gradient then return cfg.colors.barFixed end
   local colors = cfg.colors
@@ -114,6 +153,9 @@ end
 ----------------------------------------------------------------------------
 local iconAtlas   -- nil = not tried, false = unavailable
 
+--- The spell-icon texture atlas, found once and cached (false = unavailable).
+--- The handle's methods vary by MQ build, so callers probe them via pcall.
+---@return any|nil atlas # CTextureAnimation handle, nil when missing
 local function icon_atlas()
   if iconAtlas == nil then
     for _, name in ipairs({ 'A_SpellIcons', 'A_SpellGems' }) do
@@ -147,16 +189,28 @@ local ICON_VARIANTS = {
 }
 local iconVariant   -- nil = unprobed, 0 = none work, else index
 
--- The binding method is SetTextureCell (mq source: lua_EQBindings.cpp binds
--- CTextureAnimation::SetCurCell as "SetTextureCell"); older builds may have
--- exposed SetCurrentCell, so try both.
+--- Select an atlas cell. The binding method is SetTextureCell (mq source:
+--- lua_EQBindings.cpp binds CTextureAnimation::SetCurCell as
+--- "SetTextureCell"); older builds may have exposed SetCurrentCell, so both
+--- are tried.
+---@param atlas any # CTextureAnimation handle (methods probed via pcall)
+---@param cell integer # SpellIcon cell index
+---@return boolean ok
 local function set_cell(atlas, cell)
   if pcall(function() atlas:SetTextureCell(cell) end) then return true end
   return pcall(function() atlas:SetCurrentCell(cell) end)
 end
 
--- Draw one spell icon at absolute screen coords. Falls back to a colored
--- square if no texture-animation variant works in this MQ build.
+--- Draw one spell icon at absolute screen coords (A_SpellIcons atlas cell).
+--- Falls back to a colored square if no texture-animation variant works in
+--- this MQ build (R.caps.iconDraw records the outcome).
+---@param drawList ImDrawList
+---@param x number # left edge, pixels
+---@param y number # top edge, pixels
+---@param size number # icon size in pixels (floored)
+---@param iconCell integer|nil # Spell.SpellIcon cell, nil = fallback square
+---@param fallbackC number[] # {r,g,b,a} for the fallback square
+---@param alpha number # 0..1 plate alpha
 local function draw_spell_icon(drawList, x, y, size, iconCell, fallbackC, alpha)
   local atlas = icon_atlas()
   R.caps.atlasFound = atlas and true or false
@@ -187,6 +241,16 @@ end
 ----------------------------------------------------------------------------
 -- Procedural bar textures.
 ----------------------------------------------------------------------------
+--- Diagonal stripe overlay for the Stripes bar texture (scrolls when
+--- anim.stripeScroll is on). Clips properly when caps.clipRect works.
+---@param drawList ImDrawList
+---@param cfg NameplatesConfig # nameplates settings (anim.stripeScroll/stripeSpeed)
+---@param x0 number # fill rect, pixels
+---@param y0 number
+---@param x1 number
+---@param y1 number
+---@param alpha number # 0..1 plate alpha
+---@param timeNow number # frame timebase
 local function stripes_overlay(drawList, cfg, x0, y0, x1, y1, alpha, timeNow)
   local sw, gap = 6, 6
   local period = sw + gap
@@ -213,6 +277,18 @@ local function stripes_overlay(drawList, cfg, x0, y0, x1, y1, alpha, timeNow)
   end
 end
 
+--- Fill a bar span with the configured texture style (Flat / Gradient /
+--- Glass / Stripes; Segmented draws its ticks separately). The procedural
+--- "texture" engine for HP and cast bars.
+---@param drawList ImDrawList
+---@param cfg NameplatesConfig # nameplates settings (bar.texture, bar.rounding, anim.*)
+---@param x0 number # fill rect, pixels
+---@param y0 number
+---@param x1 number # right edge of the FILLED span (not the whole bar)
+---@param y1 number
+---@param c number[] # base fill color {r,g,b,a}
+---@param alpha number # 0..1 plate alpha
+---@param timeNow number # frame timebase (stripe scroll)
 local function fill_styled(drawList, cfg, x0, y0, x1, y1, c, alpha, timeNow)
   if x1 - x0 < 0.5 then return end
   local style = cfg.bar.texture
@@ -245,6 +321,14 @@ local function fill_styled(drawList, cfg, x0, y0, x1, y1, c, alpha, timeNow)
   end
 end
 
+--- Tick marks every 10% for the Segmented bar texture (no-op otherwise).
+---@param drawList ImDrawList
+---@param cfg NameplatesConfig # nameplates settings (bar.texture)
+---@param x0 number # FULL bar rect, pixels (not just the filled span)
+---@param y0 number
+---@param x1 number
+---@param y1 number
+---@param alpha number # 0..1 plate alpha
 local function segment_ticks(drawList, cfg, x0, y0, x1, y1, alpha)
   if cfg.bar.texture ~= BT.SEGMENTS then return end
   local w = x1 - x0
@@ -255,6 +339,16 @@ local function segment_ticks(drawList, cfg, x0, y0, x1, y1, alpha)
   end
 end
 
+--- Light band sweeping across a bar every anim.sheenPeriod seconds.
+---@param drawList ImDrawList
+---@param cfg NameplatesConfig # nameplates settings (anim.sheenPeriod)
+---@param x0 number # bar rect, pixels
+---@param y0 number
+---@param x1 number
+---@param y1 number
+---@param alpha number # 0..1 plate alpha
+---@param timeNow number # frame timebase
+---@param phase number # per-plate phase offset (desyncs the sweeps)
 local function sheen_sweep(drawList, cfg, x0, y0, x1, y1, alpha, timeNow, phase)
   local period = math.max(cfg.anim.sheenPeriod, 0.5)
   local t = ((timeNow + phase) % period) / period
@@ -275,10 +369,19 @@ local function sheen_sweep(drawList, cfg, x0, y0, x1, y1, alpha, timeNow, phase)
   end
 end
 
+--- 0..1 sine pulse at a frequency in Hz, with an optional phase offset
+--- (per-plate phases keep a crowd desynced; omit it for synced pulses).
+---@param timeNow number # frame timebase
+---@param hz number # cycles per second
+---@param phase number|nil # timebase offset (default 0)
+---@return number pulse # 0..1
 local function hz_pulse(timeNow, hz, phase)
   return 0.5 + 0.5 * math.sin((timeNow + (phase or 0)) * hz * 2 * math.pi)
 end
 
+--- Mouse position, tolerant of binding differences (two numbers vs ImVec2).
+---@return number|nil x # nil when unavailable
+---@return number|nil y
 local function mouse_pos()
   local okk, alpha, b = pcall(ImGui.GetMousePos)
   if not okk then return end
@@ -289,11 +392,19 @@ local function mouse_pos()
   end
 end
 
+--- Is the right mouse button held? (pcall-guarded for older bindings.)
+---@return boolean
 local function right_mouse_down()
   local okk, v = pcall(ImGui.IsMouseDown, 1)
   return okk and v or false
 end
 
+--- HSV -> {r,g,b,a} color (rainbow name animations).
+---@param h number # hue 0..1 (wraps)
+---@param s number # saturation 0..1
+---@param v number # value 0..1
+---@param a4 number|nil # alpha (default 1)
+---@return number[] color
 local function hsv_color(h, s, v, a4)
   local i = math.floor(h * 6) % 6
   local f = h * 6 - math.floor(h * 6)
@@ -308,7 +419,10 @@ local function hsv_color(h, s, v, a4)
   return { r1, g1, b1, a4 or 1 }
 end
 
--- Deterministic per-name scramble (same name -> same gibberish every frame).
+--- Deterministic per-name scramble (same name -> same gibberish every frame,
+--- so anonymized names don't flicker).
+---@param name string
+---@return string gibberish # same length, A-Z
 local function scramble(name)
   local seed = 5381
   for c = 1, #name do seed = (seed * 33 + name:byte(c)) % 2147483647 end
@@ -323,8 +437,20 @@ end
 local AM = types.AnonMode
 local NA = types.NameAnim
 
--- Draw a name with optional per-character animation. Modes 1-3 draw the
--- whole string; 4+ draw letter by letter, each with its own phase.
+--- Draw a name with its configured animation. Modes up to RAINBOW draw the
+--- whole string at once; the rest draw letter by letter, each with its own
+--- phase (wave, bounce, jitter, pulse, typewriter, rainbow-wave).
+---@param drawList ImDrawList
+---@param cfg NameplatesConfig # nameplates settings (name.anim/animSpeed/animAmount/shadow)
+---@param colors NpColors # cfg.colors
+---@param label string # the (possibly anonymized) name to draw
+---@param tx number # left edge, pixels
+---@param ty number # top edge, pixels
+---@param ts number # text size
+---@param baseC number[] # base text color {r,g,b,a}
+---@param alpha number # 0..1 plate alpha
+---@param timeNow number # frame timebase
+---@param phase number # per-plate phase offset
 local function draw_name_text(drawList, cfg, colors, label, tx, ty, ts, baseC, alpha, timeNow, phase)
   local mode = cfg.name.anim
   if mode <= NA.RAINBOW then
@@ -364,7 +490,10 @@ local function draw_name_text(drawList, cfg, colors, label, tx, ty, ts, baseC, a
   end
 end
 
--- Anonymized display name for PCs (NPCs always keep their real name).
+--- Anonymized display name for PCs (NPCs always keep their real name).
+---@param cfg NameplatesConfig # nameplates settings (name.anonMode)
+---@param plate Plate
+---@return string label
 local function display_name(cfg, plate)
   local n = plate.name or '?'
   if not plate.isPC then return n end
@@ -383,7 +512,9 @@ local function display_name(cfg, plate)
   return n:sub(1, 1) .. string.rep('*', #n - 2) .. n:sub(-1)
 end
 
--- Open the in-game Spell Display window by "clicking" a generated link.
+--- Open the in-game Spell Display window by "clicking" a generated link
+--- (the buff right-click-inspect feature).
+---@param spellID integer
 local function inspect_spell(spellID)
   pcall(function()
     local spell = mq.TLO.Spell(spellID) --[[@as spell]]   -- narrow the TLO union
@@ -406,9 +537,18 @@ local DIM          = { 0, 0, 0, 1 }
 
 local BFM = types.BuffBorderMode
 
--- Lay out n icons in grid space: primary axis runs along +x (horiz) or +y,
--- wrapping after `per` items along the other axis. Per-icon sizes vary with
--- their override scale. Returns positions + bounding box.
+--- Lay out n icons in grid space: primary axis runs along +x (horiz) or +y,
+--- wrapping after `per` items along the other axis. Per-icon sizes vary with
+--- their override scale.
+---@param list BuffEntry[] # entries (only .scale is read here)
+---@param n integer # how many to lay out
+---@param size number # base icon size in pixels
+---@param gap number # spacing between icons
+---@param per integer # wrap after this many along the primary axis
+---@param horiz boolean # true = rows, false = columns
+---@return { x: number, y: number, sz: number }[] pos # grid-space cell per icon
+---@return number W # bounding width
+---@return number H # bounding height
 local function layout_grid(list, n, size, gap, per, horiz)
   local pos = {}
   local wrapOff, idx = 0, 1
@@ -433,6 +573,10 @@ local function layout_grid(list, n, size, gap, per, horiz)
   return pos, W, H
 end
 
+--- Border color for one buff icon (by type or by caster, per settings).
+---@param buffCfg NpBuffsCfg # cfg.buffs
+---@param entry BuffEntry
+---@return RGBA color
 local function buff_border_color(buffCfg, entry)
   if buffCfg.borderMode == BFM.BY_CASTER then
     return entry.mine and buffCfg.mineBorder or buffCfg.otherBorder
@@ -440,6 +584,16 @@ local function buff_border_color(buffCfg, entry)
   return entry.ben and BEN_BORDER or DET_BORDER
 end
 
+--- Draw one buff icon row anchored to a plate side, advancing the geometry
+--- cursor for that side so stacked rows don't overlap. Also handles hover
+--- tooltips (foreground list) and right-click inspect.
+---@param drawList ImDrawList
+---@param cfg NameplatesConfig # nameplates settings
+---@param list BuffEntry[]|nil # entries to draw (pre-sorted, pre-filtered)
+---@param rowCfg NpBuffRowCfg # which side + stacking direction
+---@param geom PlateGeom # per-side geometry cursors from R.plate (mutated)
+---@param alpha number # 0..1 plate alpha
+---@param timeNow number # frame timebase
 local function draw_buff_row(drawList, cfg, list, rowCfg, geom, alpha, timeNow)
   if not list or #list == 0 or rowCfg.position == BP.HIDDEN then return end
   local buffCfg = cfg.buffs
@@ -530,6 +684,14 @@ local function draw_buff_row(drawList, cfg, list, rowCfg, geom, alpha, timeNow)
   end
 end
 
+--- Draw a plate's buff rows (beneficial/detrimental, combined or separate).
+---@param drawList ImDrawList
+---@param cfg NameplatesConfig # nameplates settings
+---@param plate Plate # reads plate.buffsB / plate.buffsD
+---@param geom PlateGeom # per-side geometry cursors (mutated)
+---@param alpha number # 0..1 plate alpha
+---@param isTarget boolean|nil # the onlyTarget filter
+---@param timeNow number # frame timebase
 local function draw_buffs(drawList, cfg, plate, geom, alpha, isTarget, timeNow)
   local buffCfg = cfg.buffs
   if not buffCfg.enabled then return end
@@ -549,7 +711,19 @@ end
 ----------------------------------------------------------------------------
 -- Cast bar under the plate stack.
 ----------------------------------------------------------------------------
----@param castInfo CastInfo
+--- Draw the cast bar under the plate stack: spell icon, styled fill on the
+--- tracker's REAL clock (visuals stay on the frame timebase), name/time
+--- text, the interrupted state, and the finish pulse. Extends the geometry
+--- cursors so plate.ext covers it.
+---@param drawList ImDrawList
+---@param cfg NameplatesConfig # nameplates settings (castbar.*)
+---@param castInfo CastInfo # from eqgfx.casts
+---@param cx number # plate center X, pixels
+---@param geom PlateGeom # per-side geometry cursors (bottom/left/right mutated)
+---@param w number # plate bar width (cast bar scales from it)
+---@param alpha number # 0..1 plate alpha
+---@param timeNow number # frame timebase (sheen/pulse visuals)
+---@param phase number # per-plate phase offset
 local function cast_bar(drawList, cfg, castInfo, cx, geom, w, alpha, timeNow, phase)
   local castCfg, colors = cfg.castbar, cfg.colors
   local h  = castCfg.height
@@ -616,9 +790,22 @@ end
 ----------------------------------------------------------------------------
 -- One plate, centered on p.sx/p.sy.
 ----------------------------------------------------------------------------
----@param plate Plate
----@param castInfo CastInfo|nil
----@param isTarget boolean|nil
+
+--- Draw one complete nameplate at its projected position: glow rings,
+--- border, HP bar (with AE-highlight tint), resource bars, HP % text, name,
+--- buff rows, cast bar. Records the actual drawn footprint into plate.ext
+--- (relative to sx/sy) for next frame's native-UI occlusion test.
+---
+--- ```lua
+--- -- inside the overlay window's draw pass:
+--- render.plate(drawList, cfg, plate, casts.get(plate.id), timeNow, plate.id == tgtID)
+--- ```
+---@param drawList ImDrawList # the overlay window's draw list
+---@param cfg NameplatesConfig # nameplates settings
+---@param plate Plate # must have sx/sy set by the caller
+---@param castInfo CastInfo|nil # active cast to show a cast bar for
+---@param timeNow number # frame timebase (drives all passive animation)
+---@param isTarget boolean|nil # apply the target styling
 function R.plate(drawList, cfg, plate, castInfo, timeNow, isTarget)
   local colors = cfg.colors
   local targetCfg = cfg.target
@@ -711,6 +898,7 @@ function R.plate(drawList, cfg, plate, castInfo, timeNow, isTarget)
   end
 
   -- per-side geometry cursors for stacking (resources/name/buffs/cast bar)
+  ---@type PlateGeom
   local geom = {
     x0 = x0, x1 = x1, y0 = y0, y1 = y1, cy = cy,
     top    = y0 - bt,        -- grows upward

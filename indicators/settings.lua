@@ -7,6 +7,9 @@
 local mq    = require('mq')
 local Store = require('eqgfx.lib.settings')
 
+-- The defaults, checked against the IndicatorsConfig classes declared in
+-- indicators/_types.lua - drift between them is a diagnostic.
+---@type IndicatorsConfig
 local DEFAULTS = {
   showEnemies   = true,
   showFriendly  = false,
@@ -34,8 +37,13 @@ local DEFAULTS = {
   },
 }
 
-return Store.new{
+--- The indicators settings store: a SettingsStore whose .data is typed as
+--- the IndicatorsConfig tree.
+---@class IndicatorsStore: SettingsStore
+---@field data IndicatorsConfig
+
+return Store.new({
   section  = 'indicators',
   defaults = DEFAULTS,
   legacy   = mq.configDir .. '/eqgfx_indicator.lua',
-}
+}) --[[@as IndicatorsStore]]

@@ -19,10 +19,16 @@ local SEGMENTS        = 48
 
 local R = {}
 
--- ImGui draw list wants a packed ImU32; settings hold float4.
+--- Settings color ({r,g,b,a} floats) -> ImGui packed u32.
+---@param c number[] # {r,g,b,a} floats 0..1
+---@return integer u32
 local function u32(c) return ImGui.ColorConvertFloat4ToU32({ c[1], c[2], c[3], c[4] }) end
 R.u32 = u32
 
+--- Fill + outline colors for a caster category.
+---@param cat string # 'self' | 'friend' | 'enemy'
+---@return integer fill # packed fill color
+---@return integer line # packed outline color
 local function cols_for(cat)
   local C = (settings.data or {}).colors
   if     cat == 'self'   then return u32(C.selfFill),   u32(C.selfLine)
@@ -30,13 +36,28 @@ local function cols_for(cat)
   else                        return u32(C.enemyFill),  u32(C.enemyLine) end
 end
 
--- EQ heading (deg, 0=N) -> world atan2 angle. heading increases clockwise; +90.
+--- EQ heading (deg, 0=N, clockwise) -> world atan2 angle. Keep in lockstep
+--- with nameplates/ae.lua facing_rad().
+---@param h number|nil # Spawn.Heading.Degrees()
+---@return number rad
 local function facing_rad(h) return math.rad(90 + (h or 0)) end
 
--- Fan-fill a perimeter of WORLD points around a WORLD center, then outline it.
--- Each filled wedge (center, p_i, p_{i+1}) is drawn only when all three
--- vertices are in front of the camera, so a ring you stand inside degrades
--- gracefully.
+--- Fan-fill a perimeter of WORLD points around a WORLD center, then outline
+--- it. Each filled wedge (center, p_i, p_{i+1}) is drawn only when all three
+--- vertices are in front of the camera, so a ring you stand inside degrades
+--- gracefully instead of exploding across the screen.
+---
+--- ```lua
+--- fill_and_outline(drawList, x, y, z, circle_pts(x, y, z, 30, 48), true, fill, line)
+--- ```
+---@param drawList ImDrawList
+---@param cx number # world center (TLO order)
+---@param cy number
+---@param cz number
+---@param pts { x: number, y: number, z: number }[] # perimeter in order
+---@param closed boolean # connect the last point back to the first
+---@param fillCol integer # packed fill color
+---@param lineCol integer # packed outline color
 local function fill_and_outline(drawList, cx, cy, cz, pts, closed, fillCol, lineCol)
   local csx, csy, cIn = eqgfx.project(cx, cy, cz)
   local n = #pts
@@ -72,7 +93,13 @@ local function fill_and_outline(drawList, cx, cy, cz, pts, closed, fillCol, line
 end
 R.fill_and_outline = fill_and_outline
 
--- N world points on a circle (clockwise) at ground z.
+--- N world points on a circle (clockwise) at ground z.
+---@param cx number # circle center (TLO order)
+---@param cy number
+---@param cz number # ground height
+---@param radius number # world units
+---@param n integer # point count
+---@return { x: number, y: number, z: number }[] pts
 local function circle_pts(cx, cy, cz, radius, n)
   local pts = {}
   for i = 0, n - 1 do
@@ -83,7 +110,16 @@ local function circle_pts(cx, cy, cz, radius, n)
 end
 R.circle_pts = circle_pts
 
--- Arc wedge perimeter from a0..a1 (center supplied by fill_and_outline).
+--- Arc wedge perimeter from a0..a1 (the center vertex is supplied by
+--- fill_and_outline, making the wedge).
+---@param cx number # arc center (TLO order)
+---@param cy number
+---@param cz number
+---@param radius number # world units
+---@param a0 number # start angle, radians (world atan2 frame)
+---@param a1 number # end angle, radians
+---@param n integer # subdivisions
+---@return { x: number, y: number, z: number }[] pts
 local function arc_pts(cx, cy, cz, radius, a0, a1, n)
   if a1 < a0 then a0, a1 = a1, a0 end
   local pts = {}
@@ -95,7 +131,14 @@ local function arc_pts(cx, cy, cz, radius, a0, a1, n)
   return pts
 end
 
--- Filled quad (beam) from four world corners in order.
+--- Filled quad (beam) from four world corners in order, with outline.
+---@param drawList ImDrawList
+---@param activeCast { x: number, y: number, z: number } # corner A
+---@param b { x: number, y: number, z: number } # corner B
+---@param c { x: number, y: number, z: number } # corner C
+---@param d { x: number, y: number, z: number } # corner D
+---@param fillCol integer # packed fill color
+---@param lineCol integer # packed outline color
 local function fill_quad(drawList, activeCast, b, c, d, fillCol, lineCol)
   local function P(w) return eqgfx.project(w.x, w.y, w.z) end
   local ax, ay, ai = P(activeCast); local bx, by, bi = P(b)
@@ -109,15 +152,24 @@ local function fill_quad(drawList, activeCast, b, c, d, fillCol, lineCol)
   end
 end
 
+--- A spawn's position with the configured ground offset applied (areas sit
+--- on the ground, not at chest height).
+---@param spawn spawn # live spawn TLO
+---@return number x
+---@return number y
+---@return number z # Z minus cfg.groundOffset
 local function spawn_ground(spawn)
   return spawn.X(), spawn.Y(), spawn.Z() - (settings.data or {}).groundOffset
 end
 
--- Draw one active cast's area / line.
----@param activeCast ActiveCast
+--- Draw one active cast's area: ring (caster- or target-centered), cone
+--- wedge, beam quad, or a caster->target line for single-target spells -
+--- per the spell's geometry and the category/shape toggles.
+---@param drawList ImDrawList # background draw list (clipped by the caller)
+---@param activeCast ActiveCast # one entry from the feature's active set
 function R.draw_active(drawList, activeCast)
   local cfg = settings.data or {}
-  local spawn = mq.TLO.Spawn(activeCast.id)
+  local spawn = mq.TLO.Spawn(activeCast.id) --[[@as spawn]]
   if not (spawn() and spawn.X()) then return end
 
   local cat = activeCast.isSelf and 'self' or (activeCast.friend and 'friend' or 'enemy')
@@ -166,7 +218,8 @@ function R.draw_active(drawList, activeCast)
 
   elseif TARGET_CENTERED[tt] then
     if not cfg.showTargetAoE then return end
-    local tsp = activeCast.targetID and mq.TLO.Spawn(activeCast.targetID) or (activeCast.isSelf and mq.TLO.Target or nil)
+    local tsp = (activeCast.targetID and mq.TLO.Spawn(activeCast.targetID)
+                 or (activeCast.isSelf and mq.TLO.Target or nil)) --[[@as spawn|nil]]
     if tsp and tsp() and tsp.X() then
       local tx, ty, tz = spawn_ground(tsp)
       fill_and_outline(drawList, tx, ty, tz, circle_pts(tx, ty, tz, radius, SEGMENTS), true, fillCol, lineCol)
@@ -175,7 +228,8 @@ function R.draw_active(drawList, activeCast)
   else
     -- single target / direct: line from caster to target.
     if not cfg.showLines then return end
-    local tsp = activeCast.targetID and mq.TLO.Spawn(activeCast.targetID) or (activeCast.isSelf and mq.TLO.Target or nil)
+    local tsp = (activeCast.targetID and mq.TLO.Spawn(activeCast.targetID)
+                 or (activeCast.isSelf and mq.TLO.Target or nil)) --[[@as spawn|nil]]
     if tsp and tsp() and tsp.X() then
       local tx, ty, tz = spawn_ground(tsp)
       local ax, ay, ai = eqgfx.project(cx, cy, cz)
@@ -185,7 +239,9 @@ function R.draw_active(drawList, activeCast)
   end
 end
 
--- Cyan reference ring around the player (toggled from the menu / /aering).
+--- Cyan reference ring around the player (toggled from the menu / /aering) -
+--- a fixed-radius calibration aid.
+---@param drawList ImDrawList
 function R.draw_debug_ring(drawList)
   local cfg = settings.data or {}
   local me = mq.TLO.Me

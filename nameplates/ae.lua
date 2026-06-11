@@ -64,12 +64,16 @@ local M = {}
 -- the caster's cast expires out of the tracker.
 local perCaster = {}
 
--- EQ heading (deg, 0=N, clockwise) -> world atan2 angle. Same convention as
--- indicators/render.lua facing_rad(); keep them in lockstep.
+--- EQ heading (deg, 0=N, clockwise) -> world atan2 angle. Same convention as
+--- indicators/render.lua facing_rad(); keep them in lockstep.
+---@param deg number|nil # Spawn.Heading.Degrees()
+---@return number rad # angle usable with math.cos/sin in world X/Y
 local function facing_rad(deg)
   return math.rad(90 + (deg or 0))
 end
 
+--- IDs of everyone in my group (used to resolve group-target spells).
+---@return table<integer, boolean> ids
 local function my_group_ids()
   local ids = {}
   pcall(function()
@@ -82,7 +86,18 @@ local function my_group_ids()
   return ids
 end
 
--- One cast -> AeState (or nil when it has no resolvable area footprint).
+--- One cast -> AeState, or nil when it has no resolvable area footprint
+--- (single-target/self spells, unknowable group casts, unresolved victims,
+--- filtered sources).
+---@param id integer # caster spawn ID
+---@param castInfo CastInfo # from the shared tracker
+---@param myID integer # my spawn ID
+---@param meX number # my position (already read by the caller)
+---@param meY number
+---@param meZ number
+---@param aehl NpAehlCfg # cfg.aehl (source filters)
+---@param groups fun(): table<integer, boolean> # lazy my-group-IDs lookup
+---@return AeState|nil
 local function state_for(id, castInfo, myID, meX, meY, meZ, aehl, groups)
   if castInfo.interrupted or (castInfo.isSelf and castInfo.done) then return nil end
   if not castInfo.spellID then return nil end
@@ -198,9 +213,18 @@ local function state_for(id, castInfo, myID, meX, meY, meZ, aehl, groups)
   return st
 end
 
--- All areas currently in flight, one AeState per active cast that has a
--- resolvable footprint. meX/meY/meZ are passed in (the caller already read them).
----@return AeState[]
+--- All areas currently in flight: one AeState per active cast that has a
+--- resolvable footprint. Recompute every frame - casters, victims and
+--- facings move while casts are in flight.
+---
+--- ```lua
+--- local aeStates = cfg.aehl.enabled and ae.states(cfg, mex, mey, mez) or nil
+--- ```
+---@param cfg NameplatesConfig # the nameplates settings (reads cfg.aehl)
+---@param meX number # my position (the caller already read it)
+---@param meY number
+---@param meZ number
+---@return AeState[] states # empty when nothing area-shaped is casting
 function M.states(cfg, meX, meY, meZ)
   local aehl = cfg.aehl
   local out = {}
@@ -221,15 +245,23 @@ function M.states(cfg, meX, meY, meZ)
   return out
 end
 
--- Will this plate be affected by one area? Eligibility first (which side the
--- area marks; group spells -> my group only; pets and mercs are never marked),
--- then the geometric test at the spawn's live position.
----@param st AeState
----@param plate Plate
----@param x number
+--- Will this plate be affected by one area? Eligibility first (which side
+--- the area marks; group spells -> my group only; pets and mercs are never
+--- marked), then the geometric test at the spawn's live position. Circles
+--- test 3D distance; cones/beams are heading-planar (2D).
+---
+--- ```lua
+--- for _, st in ipairs(aeStates) do
+---   local kind = ae.affects(st, plate, x, y, z)   -- 'det' | 'ben' | nil
+---   if kind == 'det' then detN = detN + 1 end
+--- end
+--- ```
+---@param st AeState # one area from states()
+---@param plate Plate # the plate being tested (kind/isSelf/inGroup matter)
+---@param x number # the spawn's live position (TLO order)
 ---@param y number
 ---@param z number
----@return string|nil   st.kind when affected, else nil
+---@return string|nil kind # st.kind ('det'|'ben') when affected, else nil
 function M.affects(st, plate, x, y, z)
   if st.marks == 'npc' then
     if plate.kind ~= 'npc' then return nil end

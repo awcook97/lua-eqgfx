@@ -12,6 +12,8 @@ log.SetIncludeSource("trace")
 
 local helpers = {}
 
+--- Register the EQBC response event and reset the query state. Runs once at
+--- require time; only call again to clear pending queries.
 function helpers.Init()
     mq.event('GotResponse', "[#1#(msg)] eqgfx_QS_#2#_QE START_#3#_END", helpers.GotResponse)
     -- mq.event('NoSuchName', "# - #1#: No such name.", helpers.NoSuchName)
@@ -19,6 +21,16 @@ function helpers.Init()
     helpers.ObserverList = {}
 end
 
+--- Evaluate a TLO expression ON A PEER over EQBC and wait for the answer.
+--- BLOCKS the calling script (pumping mq.doevents) until the response or
+--- the timeout.
+---
+--- ```lua
+--- local hp = helpers.query('Boxtoon', 'Me.PctHPs', 2000)
+--- ```
+---@param peerName string # EQBC peer name (must be connected)
+---@param query string # TLO expression without ${} (e.g. 'Me.PctHPs')
+---@return string|integer|nil data # the peer's answer, 0 when the peer is unknown, nil on timeout
 function helpers.query(peerName, query, timeout)
     if not mq.TLO.EQBC.Names():find(peerName) then return 0 end
     local myName = mq.TLO.EQBC.ToonName()
@@ -42,6 +54,11 @@ function helpers.query(peerName, query, timeout)
     return data
 end
 
+--- Event handler: file a peer's answer where query() is polling for it.
+---@param _ string # full line (unused)
+---@param sender string # peer name
+---@param query string # the query string echoed back
+---@param data string # the evaluated value
 function helpers.GotResponse(_, sender, query, data)
     helpers.QueryMap[query][sender] = data
 end

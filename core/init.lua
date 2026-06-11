@@ -141,10 +141,12 @@ do
   lib = l
 end
 
+--- The eqgfx core API: engine-backed world drawing, projection and spell
+--- geometry for MacroQuest Lua. See docs/CORE_API.md for the full guide.
 ---@class Eqgfx
----@field ui_native boolean|nil  native window enumeration available
----@field dll_stale boolean|nil  loaded DLL predates the one on disk
----@field TargetType table<string, integer>
+---@field ui_native boolean|nil # native window enumeration available (set by init)
+---@field dll_stale boolean|nil # the game loaded an older eqgfx.dll than the one on disk
+---@field TargetType table<string, integer> # eSpellTargetType values (PBAE, Beam, ...)
 local M = {}
 
 -- scalar cdata fields read back as plain Lua numbers
@@ -160,6 +162,17 @@ local function deref_inst(addr)
   return p
 end
 
+--- Wire up eqgfx: read the live engine pointers from eqlib's exports, hand
+--- them to the DLL, and register the render callback. Must be called IN GAME
+--- (character loaded) before anything else; check the result, don't assume.
+---
+--- ```lua
+--- local eqgfx = require('eqgfx')
+--- local ok, err = eqgfx.init()
+--- if not ok then print('eqgfx: ' .. tostring(err)) return end
+--- ```
+---@return boolean ok # false when the engine isn't ready (e.g. not in game yet)
+---@return string|nil err # human-readable reason when ok is false
 function M.init()
   local pr = deref_inst(eqlib.pinstRenderInterface)
   if not pr then return false, 'render interface is null (not in game yet?)' end
@@ -186,95 +199,232 @@ function M.init()
   return true
 end
 
--- Compile stamp of the LOADED dll (vs whatever is on disk).
+--- Compile stamp of the dll the game ACTUALLY loaded (vs whatever is on
+--- disk) - what /npdebug prints as "loaded eqgfx.dll build".
+---
+--- ```lua
+--- print(eqgfx.build())   --> "Jun 11 2026 02:04:53"
+--- ```
+---@return string stamp # build date/time, or a stale-dll hint on very old builds
 function M.build()
   local okk, v = pcall(function() return ffi.string(lib.eqgfx_build()) end)
   return okk and v or 'pre-2026-06-10 (stale - restart EQ)'
 end
 
--- FindMQ2Window ABI variant in use (0 unprobed, 1 char*, 2 string_view,
--- 3/4 the same through a deref'd export variable, -1 nothing worked).
+--- Which FindMQ2Window ABI variant the native window sweep locked onto
+--- (diagnostic; shown by /npdebug).
+---@return integer mode # 0 unprobed, 1 char*, 2 string_view, 3/4 same via deref'd export variable, -1 nothing worked
 function M.ui_find_mode()
   local okk, v = pcall(function() return lib.eqgfx_ui_find_mode() end)
   return okk and v or -1
 end
 
--- Last sweep's health: candidate names, rects found, probe faults. faults > 0
--- means an export/ABI mismatch in the native scan. nil on a stale dll.
 local _usn, _usf, _usx = ffi.new('int[1]'), ffi.new('int[1]'), ffi.new('int[1]')
+
+--- Health of the last native window sweep. faults > 0 means an export/ABI
+--- mismatch inside the scan - occlusion would be silently broken otherwise.
+---
+--- ```lua
+--- local names, found, faults = eqgfx.ui_stats()
+--- ```
+---@return integer|nil names # candidate window names swept (nil on a stale dll)
+---@return integer|nil found # window rects the sweep produced
+---@return integer|nil faults # SEH probe faults (broken scan when > 0)
 function M.ui_stats()
   local okk = pcall(function() lib.eqgfx_ui_stats(_usn, _usf, _usx) end)
   if not okk then return nil end
   return tonumber(_usn[0]), tonumber(_usf[0]), tonumber(_usx[0])
 end
 
--- Candidate window names for the native UI scan (newline-joined internally).
+--- Push the candidate window-name list for the native UI scan. lib/uirects
+--- owns this; scripts normally never call it directly.
+---@param names string[] # window names as shown by /windows (order matters: rect.idx indexes it)
 function M.set_ui_names(names)
   pcall(function() lib.eqgfx_set_ui_names(table.concat(names, '\n')) end)
 end
 
+--- Unregister the render callback and drop every queued primitive. Call on
+--- script exit.
 function M.shutdown() lib.eqgfx_shutdown() end
+
+--- Wipe the retained scene (world + screen primitives). Call at the top of
+--- each main-loop pass, then re-add what should exist right now - the engine
+--- redraws whatever is queued every frame until the next clear().
+---
+--- ```lua
+--- while true do
+---   eqgfx.clear()
+---   eqgfx.add_circle(me.X(), me.Y(), me.Z(), 30, eqgfx.argb(180, 0, 255, 0))
+---   mq.delay(50)
+--- end
+--- ```
 function M.clear()    lib.eqgfx_clear()    end
 
+--- Queue a ground-plane circle, engine-drawn every frame until clear().
+--- Coordinates are TLO order - pass Spawn.X()/Y()/Z() directly.
+---
+--- ```lua
+--- eqgfx.add_circle(t.X(), t.Y(), t.Z(), 15, eqgfx.argb(200, 255, 60, 60), 48)
+--- ```
+---@param x number # world X (TLO order)
+---@param y number # world Y
+---@param z number # world Z (height the ring is drawn at)
+---@param radius number # world units
+---@param color integer # packed color from eqgfx.argb()
+---@param segments integer|nil # line segments around the circle (default 48)
 function M.add_circle(x, y, z, radius, color, segments)
   lib.eqgfx_add_circle(x, y, z, radius, color, segments or 48)
 end
+
+--- Queue an arc wedge (two radii + the arc between them), e.g. a cone slice.
+--- Angles are RADIANS in the world atan2 frame (x = cos, y = sin); for an
+--- arc relative to a spawn's facing see indicators/render.lua facing_rad().
+---@param cx number # arc center X (TLO order)
+---@param cy number # arc center Y
+---@param cz number # arc center Z
+---@param radius number # world units
+---@param startRad number # start angle in radians
+---@param endRad number # end angle in radians
+---@param color integer # packed color from eqgfx.argb()
+---@param segments integer|nil # subdivisions along the arc (default 24)
 function M.add_arc(cx, cy, cz, radius, startRad, endRad, color, segments)
   lib.eqgfx_add_arc(cx, cy, cz, radius, startRad, endRad, color, segments or 24)
 end
+
+--- Queue a world-space line segment. Drawn only while both endpoints are in
+--- front of the camera.
+---
+--- ```lua
+--- eqgfx.add_line(me.X(), me.Y(), me.Z(), t.X(), t.Y(), t.Z(),
+---                eqgfx.argb(255, 255, 215, 50))
+--- ```
+---@param x1 number # first endpoint X (TLO order)
+---@param y1 number # first endpoint Y
+---@param z1 number # first endpoint Z
+---@param x2 number # second endpoint X
+---@param y2 number # second endpoint Y
+---@param z2 number # second endpoint Z
+---@param color integer # packed color from eqgfx.argb()
 function M.add_line(x1, y1, z1, x2, y2, z2, color)
   lib.eqgfx_add_line(x1, y1, z1, x2, y2, z2, color)
 end
 
--- Diagnostics. sceneCalls grows only if MQ is actually invoking our render
--- callback; lastDraws is how many lines it drew on the previous frame.
 local _sc, _ld = ffi.new('uint32_t[1]'), ffi.new('uint32_t[1]')
+
+--- Render-callback diagnostics. If sceneCalls isn't growing, the callback
+--- isn't firing (init failed / not in game); lastDraws says how much of your
+--- retained scene actually drew.
+---
+--- ```lua
+--- local calls, draws = eqgfx.stats()
+--- ```
+---@return integer sceneCalls # cumulative render-callback invocations
+---@return integer lastDraws # primitives drawn on the previous frame
 function M.stats()
   lib.eqgfx_stats(_sc, _ld)
-  return tonumber(_sc[0]), tonumber(_ld[0])
+  return tonumber(_sc[0]) --[[@as integer]], tonumber(_ld[0]) --[[@as integer]]
 end
 
--- World coordinate convention (0..5). Calibrated in-game; see tools/calibrate.lua.
+--- Calibration leftover: world-coordinate convention. The shipped default is
+--- already calibrated - only touch via tools/calibrate.lua.
+---@param mode integer # axis permutation 0..6 (6 = the solved EQ render frame)
 function M.set_axis_mode(mode) lib.eqgfx_set_axis_mode(mode) end
-function M.set_convention(c)   lib.eqgfx_set_convention(c) end   -- 0=row-vector, 1=column-vector
+
+--- Calibration leftover: matrix multiply convention.
+---@param c integer # 0 = row-vector (v*M), 1 = column-vector (M*v)
+function M.set_convention(c)   lib.eqgfx_set_convention(c) end
+
+--- Calibration leftover: subtract the camera eye before transforming.
+---@param e boolean # true = eye-relative, false = absolute world->clip
 function M.set_eyerel(e)       lib.eqgfx_set_eyerel(e and 1 or 0) end
-function M.set_wsign(s)        lib.eqgfx_set_wsign(s) end        -- sign of clip.w for front points
-function M.set_flipx(f)        lib.eqgfx_set_flipx(f and 1 or 0) end  -- mirror horizontal axis
-function M.set_flipy(f)        lib.eqgfx_set_flipy(f and 1 or 0) end  -- mirror vertical axis
+
+--- Calibration leftover: sign of clip.w for front-facing points.
+---@param s integer # +1 or -1
+function M.set_wsign(s)        lib.eqgfx_set_wsign(s) end
+
+--- Calibration leftover: mirror the horizontal screen axis.
+---@param f boolean
+function M.set_flipx(f)        lib.eqgfx_set_flipx(f and 1 or 0) end
+
+--- Calibration leftover: mirror the vertical screen axis.
+---@param f boolean
+function M.set_flipy(f)        lib.eqgfx_set_flipy(f and 1 or 0) end
 
 local _ex, _ey, _ez = ffi.new('float[1]'), ffi.new('float[1]'), ffi.new('float[1]')
+
+--- Camera eye position in world coords (calibration/debug helper).
+---@return number x
+---@return number y
+---@return number z
 function M.get_eye()
   lib.eqgfx_get_eye(_ex, _ey, _ez)
-  return tonumber(_ex[0]), tonumber(_ey[0]), tonumber(_ez[0])
+  return tonumber(_ex[0]) --[[@as number]], tonumber(_ey[0]) --[[@as number]],
+         tonumber(_ez[0]) --[[@as number]]
 end
 
 local _cx, _cy, _cz = ffi.new('float[1]'), ffi.new('float[1]'), ffi.new('float[1]')
+
+--- The engine's own world->camera transform (calibration/debug helper).
+---@param x number # world X (TLO order)
+---@param y number # world Y
+---@param z number # world Z
+---@return number cx # view-space X
+---@return number cy # view-space Y
+---@return number cz # view-space depth
 function M.world_to_camera(x, y, z)
   lib.eqgfx_world_to_camera(x, y, z, _cx, _cy, _cz)
-  return tonumber(_cx[0]), tonumber(_cy[0]), tonumber(_cz[0])
+  return tonumber(_cx[0]) --[[@as number]], tonumber(_cy[0]) --[[@as number]],
+         tonumber(_cz[0]) --[[@as number]]
 end
 
 local _gw, _gh = ffi.new('int[1]'), ffi.new('int[1]')
+
+--- Render resolution in pixels (0,0 when the render interface is gone).
+---
+--- ```lua
+--- local w, h = eqgfx.get_screen()
+--- ```
+---@return integer w # screen width in pixels
+---@return integer h # screen height in pixels
 function M.get_screen()
   lib.eqgfx_get_screen(_gw, _gh)
-  return tonumber(_gw[0]), tonumber(_gh[0])
+  return tonumber(_gw[0]) --[[@as integer]], tonumber(_gh[0]) --[[@as integer]]
 end
 
--- Line half-width in pixels.
+--- World-line thickness for the engine primitives.
+---@param t integer # line half-width in pixels (0 = hairline)
 function M.set_thickness(t) lib.eqgfx_set_thickness(t) end
 
--- Pure 2D screen-space line (pixels), no projection.
+--- Queue a pure 2D screen-space line (pixels, no projection) - HUD elements,
+--- crosshairs. Retained until clear(), same as the world primitives.
+---@param x1 number # start X in pixels
+---@param y1 number # start Y in pixels
+---@param x2 number # end X in pixels
+---@param y2 number # end Y in pixels
+---@param color integer # packed color from eqgfx.argb()
 function M.add_screen_line(x1, y1, x2, y2, color)
   lib.eqgfx_add_screen_line(x1, y1, x2, y2, color)
 end
 
--- Filled 2D screen-space rectangle (pixels), no projection.
+--- Queue a filled 2D screen-space rectangle (pixels, no projection) - HUD
+--- fills, simple bars. Retained until clear().
+---
+--- ```lua
+--- eqgfx.add_screen_rect(20, 20, 220, 36, eqgfx.argb(160, 30, 30, 30))
+--- ```
+---@param x0 number # left edge in pixels
+---@param y0 number # top edge in pixels
+---@param x1 number # right edge in pixels
+---@param y1 number # bottom edge in pixels
+---@param color integer # packed color from eqgfx.argb()
 function M.add_screen_rect(x0, y0, x1, y1, color)
   lib.eqgfx_add_screen_rect(x0, y0, x1, y1, color)
 end
 
--- Returns the 16 floats of CRender::matrixViewProj as a flat Lua table (m[1..16]).
 local _m16 = ffi.new('float[16]')
+
+--- Copy of the engine's view-projection matrix (calibration/debug helper).
+---@return number[] m # the 16 floats as a flat table, m[1..16]
 function M.dump_matrix()
   lib.eqgfx_dump_matrix(_m16)
   local t = {}
@@ -282,29 +432,61 @@ function M.dump_matrix()
   return t
 end
 
--- Project a world point to screen pixels. Returns sx, sy, visible(bool).
 local _sx, _sy, _vis = ffi.new('float[1]'), ffi.new('float[1]'), ffi.new('int[1]')
+
+--- Project a world point to screen pixels. `visible` is true only when the
+--- point is in front of the camera AND inside the viewport - the right test
+--- for "should I draw a label/plate here at all".
+---
+--- ```lua
+--- local sx, sy, vis = eqgfx.world_to_screen(s.X(), s.Y(), s.Z() + 4)
+--- if vis then drawList:AddText(ImVec2(sx, sy), 0xFFFFFFFF, s.CleanName()) end
+--- ```
+---@param x number # world X (TLO order; pass Spawn.X() directly)
+---@param y number # world Y
+---@param z number # world Z
+---@return number sx # screen X in pixels
+---@return number sy # screen Y in pixels
+---@return boolean visible # in front of the camera AND on screen
 function M.world_to_screen(x, y, z)
   lib.eqgfx_world_to_screen(x, y, z, _sx, _sy, _vis)
-  return tonumber(_sx[0]), tonumber(_sy[0]), _vis[0] ~= 0
+  return tonumber(_sx[0]) --[[@as number]], tonumber(_sy[0]) --[[@as number]],
+         _vis[0] ~= 0
 end
 
--- Project a world point to RAW screen pixels (no on-screen clamp) and return
--- the engine's in-front-of-camera bool. Use this (not world_to_screen's
--- `visible`) when you need a reliable per-vertex front test for off-screen
--- points - e.g. triangulating a ring you stand inside. Returns sx, sy, infront.
 local _px, _py, _pf = ffi.new('float[1]'), ffi.new('float[1]'), ffi.new('int[1]')
+
+--- Project a world point to RAW screen pixels - no viewport clamp - plus the
+--- engine's in-front-of-camera bool. Use this (not world_to_screen's
+--- `visible`) when off-screen points still matter, e.g. triangulating a ring
+--- you stand inside: each wedge needs a reliable per-vertex front test even
+--- for vertices outside the screen. See indicators/render.lua fill_and_outline.
+---
+--- ```lua
+--- local sx, sy, infront = eqgfx.project(px, py, pz)
+--- if infront then table.insert(poly, ImVec2(sx, sy)) end
+--- ```
+---@param x number # world X (TLO order)
+---@param y number # world Y
+---@param z number # world Z
+---@return number sx # raw screen X in pixels (may be off-screen)
+---@return number sy # raw screen Y in pixels
+---@return boolean infront # point is in front of the camera
 function M.project(x, y, z)
   lib.eqgfx_project(x, y, z, _px, _py, _pf)
-  return tonumber(_px[0]), tonumber(_py[0]), _pf[0] ~= 0
+  return tonumber(_px[0]) --[[@as number]], tonumber(_py[0]) --[[@as number]],
+         _pf[0] ~= 0
 end
 
--- Visible, top-level, non-minimized native EQ window rects. Returns an array
--- of {x0, y0, x1, y1, idx = N} where idx is the 1-based position in the name
--- list pushed via set_ui_names (nil on a stale dll without the v2 export),
--- or nil when the native path is unavailable.
 local _uiBuf = ffi.new('float[512]')   -- 128 rects max
 local _uiIdx = ffi.new('int[128]')
+
+--- Raw snapshot of the native window sweep: one rect per visible, top-level,
+--- non-minimized EQ window, in render pixels. `idx` is the 1-based position
+--- in the name list pushed via set_ui_names (nil on a stale dll without the
+--- v2 export). Most scripts want lib/uirects.get() instead - it filters,
+--- clamps and attaches the window names.
+---@return { [1]: number, [2]: number, [3]: number, [4]: number, idx: integer|nil }[]|nil rects # {x0,y0,x1,y1,idx} array, or nil when the native path is unavailable
 function M.get_ui_rects()
   if not M.ui_native then return nil end
   local okk, n = pcall(function() return lib.eqgfx_get_ui_rects2(_uiBuf, _uiIdx, 128) end)
@@ -318,8 +500,18 @@ function M.get_ui_rects()
   return t
 end
 
--- Returns a plain Lua table {targetType, range, aeRange, coneStart, coneEnd}
--- or nil if the spell wasn't found.
+--- A spell's area geometry, straight from the client's spell data. The
+--- conventional radius is aeRange when > 0, else range; cone angles are
+--- degrees relative to the caster's facing.
+---
+--- ```lua
+--- local g = eqgfx.spell_geom(spellID)
+--- if g and g.targetType == eqgfx.TargetType.PBAE then
+---   local radius = (g.aeRange > 0) and g.aeRange or g.range
+--- end
+--- ```
+---@param spellID integer # spell ID (e.g. from mq.TLO.Me.Casting.ID())
+---@return SpellGeom|nil geom # nil when the spell can't be found
 function M.spell_geom(spellID)
   if lib.eqgfx_get_spell_geom(spellID, geom) == 0 then return nil end
   return {
@@ -331,11 +523,28 @@ function M.spell_geom(spellID)
   }
 end
 
--- Color helpers. Engine RGB byte order is unverified; if colors look wrong
--- in-game, switch argb -> abgr and we'll lock it down.
+--- Pack a color for the engine-primitive calls (add_circle, add_line, ...).
+--- NOT for ImGui draw lists - those want ImGui.ColorConvertFloat4ToU32.
+---
+--- ```lua
+--- local red = eqgfx.argb(200, 255, 60, 60)
+--- ```
+---@param a integer # alpha 0-255
+---@param r integer # red 0-255
+---@param g integer # green 0-255
+---@param b integer # blue 0-255
+---@return integer color # packed 32-bit color
 function M.argb(a, r, g, b)
   return bit.bor(bit.lshift(a, 24), bit.lshift(r, 16), bit.lshift(g, 8), b)
 end
+
+--- Byte-order-swapped variant of argb(). If reds come out blue on some
+--- client, swap argb -> abgr in your calls.
+---@param a integer # alpha 0-255
+---@param b integer # blue 0-255
+---@param g integer # green 0-255
+---@param r integer # red 0-255
+---@return integer color # packed 32-bit color
 function M.abgr(a, b, g, r)
   return bit.bor(bit.lshift(a, 24), bit.lshift(b, 16), bit.lshift(g, 8), r)
 end

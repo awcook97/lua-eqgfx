@@ -42,6 +42,13 @@ local function push_names()
   pushed = true
 end
 
+--- Track extra window names for the native scan (the `/npui add` path).
+--- Takes effect on the next get().
+---
+--- ```lua
+--- uirects.add_names({ 'MySpecialWnd' })
+--- ```
+---@param list string[]|nil # window names as shown by /windows
 function M.add_names(list)
   for _, n in ipairs(list or {}) do extraNames[#extraNames + 1] = n end
   pushed = false
@@ -57,16 +64,25 @@ end
 ---@field firstKept table|nil     first kept rect (clamped, with .name)
 M.debug = { raw = 0, kept = 0 }
 
--- Fetch every call - no clocks, no caching. The native path is one FFI call.
---
--- COORDINATE SPACE: CXWnd::GetScreenRect returns RENDER PIXELS directly -
--- verified in-game (rect 1745,90..1825,200 inside a 1920x1023 screen). Two
--- earlier "calibration" attempts both corrupted good data by scaling against
--- EQMainWnd, which is NOT the fullscreen canvas on this client - it's the
--- small EQ-button window (52x94 at the bottom-left). So: identity transform,
--- clamp to the screen (a half-off-screen window still occludes its visible
--- part), drop only empty leftovers and near-fullscreen HUD layers.
----@return table rects, boolean native
+--- The open EQ windows as screen rects, fetched fresh every call (one FFI
+--- call - cheap enough for per-frame use).
+---
+--- COORDINATE SPACE: CXWnd::GetScreenRect returns RENDER PIXELS directly -
+--- verified in-game (rect 1745,90..1825,200 inside a 1920x1023 screen). Two
+--- earlier "calibration" attempts both corrupted good data by scaling against
+--- EQMainWnd, which is NOT the fullscreen canvas on this client - it's the
+--- small EQ-button window (52x94 at the bottom-left). So: identity transform,
+--- clamp to the screen (a half-off-screen window still occludes its visible
+--- part), drop only empty leftovers and near-fullscreen HUD layers.
+---
+--- ```lua
+--- local rects, native = uirects.get()
+--- for _, r in ipairs(rects) do
+---   print(r.name, r[1], r[2], r[3], r[4])
+--- end
+--- ```
+---@return { [1]: number, [2]: number, [3]: number, [4]: number, name: string|nil }[] rects # {x0,y0,x1,y1,name} per visible window, clamped to the screen
+---@return boolean native # false when the native scan is unavailable (rects is then empty)
 function M.get()
   if not pushed and eqgfx.ui_native then push_names() end
   local raw = eqgfx.get_ui_rects()
@@ -106,8 +122,21 @@ function M.get()
   return out, true
 end
 
--- Subtract window rects from one seed rect -> the visible sub-rectangles
--- (capped). Used per plate by nameplates to clip drawing around EQ windows.
+--- Subtract window rects from one seed rect -> the visible sub-rectangles.
+--- Nameplates uses this per plate: draw once per piece inside a PushClipRect
+--- and the drawing passes visually under the windows.
+---
+--- ```lua
+--- for _, sub in ipairs(uirects.subtract({x0, y0, x1, y1}, hits, 16)) do
+---   drawList:PushClipRect(ImVec2(sub[1], sub[2]), ImVec2(sub[3], sub[4]), false)
+---   draw_plate(drawList)
+---   drawList:PopClipRect()
+--- end
+--- ```
+---@param seed number[] # {x0, y0, x1, y1} rectangle to carve from
+---@param rects number[][] # window rects to punch out
+---@param cap integer|nil # stop subdividing past this many pieces (default 24)
+---@return number[][] regions # visible {x0,y0,x1,y1} pieces of seed
 function M.subtract(seed, rects, cap)
   cap = cap or 24
   local regs = { { seed[1], seed[2], seed[3], seed[4] } }
@@ -131,7 +160,24 @@ function M.subtract(seed, rects, cap)
   return regs
 end
 
--- Screen minus windows -> list of visible rectangles (capped).
+--- Screen minus windows -> the visible screen regions. Indicators draws its
+--- whole scene once per region (clipped) so world geometry stays under the
+--- native UI.
+---
+--- ```lua
+--- local rects = uirects.get()
+--- local sw, sh = eqgfx.get_screen()
+--- for _, r in ipairs(uirects.regions(rects, sw, sh)) do
+---   drawList:PushClipRect(ImVec2(r[1], r[2]), ImVec2(r[3], r[4]), false)
+---   draw_all(drawList)
+---   drawList:PopClipRect()
+--- end
+--- ```
+---@param rects number[][] # window rects (from get())
+---@param sw number # screen width in pixels
+---@param sh number # screen height in pixels
+---@param cap integer|nil # stop subdividing past this many regions (default 24)
+---@return number[][] regions # visible {x0,y0,x1,y1} screen pieces
 function M.regions(rects, sw, sh, cap)
   return M.subtract({ 0, 0, sw, sh }, rects, cap)
 end

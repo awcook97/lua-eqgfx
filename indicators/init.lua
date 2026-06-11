@@ -54,6 +54,10 @@ casts.init{ log = log, trackSelf = true, grace = 0.5 }
 ---@type table<integer, ActiveCast>
 local active = {}
 
+--- Is this caster on the players' side? PCs/pets/mercs always; NPCs only
+--- when not aggressive. Decides the indicator color category.
+---@param spawn spawn # caster spawn TLO
+---@return boolean friend
 local function classify_friend(spawn)
   local t = spawn.Type()
   if t == 'PC' or t == 'Pet' or t == 'Mercenary' then return true end
@@ -64,10 +68,17 @@ end
 ----------------------------------------------------------------------------
 -- EQBC: broadcast resolved targets; ingest peers' resolutions.
 ----------------------------------------------------------------------------
+--- Is EQBC loaded and connected? (Target sharing is silently off otherwise.)
+---@return boolean|nil ok
 local function eqbc_ok()
   return mq.TLO.Plugin('mq2eqbc').IsLoaded() and mq.TLO.EQBC.Connected()
 end
 
+--- Broadcast a resolved cast target to the other boxes
+--- ("eqgfx_cast=casterID=spellID=targetID" over /bc).
+---@param casterID integer
+---@param spellID integer|nil # 0 when unknown
+---@param targetID integer|nil # the resolved victim
 local function announce(casterID, spellID, targetID)
   if not eqbc_ok() then return end
   mq.cmdf('/squelch /bc eqgfx_cast=%d=%d=%d', casterID, spellID or 0, targetID or 0)
@@ -95,6 +106,9 @@ end)
 ----------------------------------------------------------------------------
 local canClip   -- PushClipRect capability, probed once
 
+--- Draw every active cast (and the debug ring) once. Called once per
+--- visible screen region by draw() so geometry clips around EQ windows.
+---@param drawList ImDrawList
 local function draw_all(drawList)
   if (settings.data or {}).showDebugRing then render.draw_debug_ring(drawList) end
   for _, activeCast in pairs(active) do
@@ -102,6 +116,9 @@ local function draw_all(drawList)
   end
 end
 
+--- Per-frame ImGui callback: probe clipping once, then draw the scene
+--- clipped to the screen-minus-windows regions (or unclipped when the
+--- native scan / clipping is unavailable). Also renders the menu.
 local function draw()
   local drawList = ImGui.GetBackgroundDrawList()
   if canClip == nil then
@@ -173,7 +190,7 @@ while true do
       seen[id] = true
       local activeCast = active[id]
       if not activeCast or activeCast.spellID ~= castInfo.spellID or activeCast.castStart ~= castInfo.startedAt then
-        local spawn = mq.TLO.Spawn(id)
+        local spawn = mq.TLO.Spawn(id) --[[@as spawn]]
         active[id] = {
           id        = id,
           spellID   = castInfo.spellID,

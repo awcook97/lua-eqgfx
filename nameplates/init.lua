@@ -85,6 +85,9 @@ local uiRects = {}
 local showUiRects = false      -- /npui show: visualize detected occluders
 local nativeWarned = false
 
+--- Refresh the occluder rect cache from the native scan; optionally fill
+--- `names` with a printable line per rect (for /npui and /npdebug).
+---@param names string[]|nil # out-param: human-readable rect descriptions
 local function scan_ui_rects(names)
   local nrects, native = uirects.get()
   if native then
@@ -108,14 +111,19 @@ local function scan_ui_rects(names)
   end
 end
 
--- Per-plate native-UI occlusion. The plate's bbox is its measured footprint
--- from the previous frame (plate.ext, recorded by render.plate) at the
--- current position - over-estimating is harmless (the clip regions come from
--- the window rects, not the bbox), under-estimating leaks pixels, hence PAD.
--- Returns hide(boolean)[, hits, bbox]: hits/bbox set when the plate should
--- be drawn CLIPPED around the overlapping window rects.
-local PAD = 12   -- slack for glow rings, bob, buff appear-flash growth
+local PAD = 12   -- occlusion bbox slack: glow rings, bob, buff appear-flash growth
 
+--- Per-plate native-UI occlusion. The plate's bbox is its measured footprint
+--- from the previous frame (plate.ext, recorded by render.plate) at the
+--- current position - over-estimating is harmless (the clip regions come
+--- from the window rects, not the bbox), under-estimating leaks pixels for
+--- a frame, hence PAD.
+---@param cfg NameplatesConfig # nameplates settings (hideUnderUI, uiOccludeMode)
+---@param plate Plate # needs sx/sy; uses plate.ext when present
+---@param hasCast boolean # extend the bbox downward for a cast bar that ext may not cover yet
+---@return boolean hide # true = skip the plate entirely (HIDE mode / no clipping support)
+---@return number[][]|nil hits # window rects overlapping the bbox (CLIP mode)
+---@return number[]|nil bbox # the padded plate bbox {x0,y0,x1,y1} (CLIP mode)
 local function occlusion(cfg, plate, hasCast)
   if not cfg.hideUnderUI or #uiRects == 0 then return false end
   local bx0, by0, bx1, by1
@@ -165,6 +173,10 @@ local animNow  = 0           -- advances once per drawn frame
 
 local RS = types.ResScope
 
+--- Does this plate get a mana/endurance bar under the configured scope?
+---@param scope ResScope
+---@param plate Plate
+---@return boolean|nil yes # truthy when the bar applies
 local function want_res(scope, plate)
   if scope == RS.OFF then return false end
   if scope == RS.SELF then return plate.isSelf end
@@ -173,6 +185,13 @@ local function want_res(scope, plate)
   return true   -- ALL
 end
 
+--- Per-frame plate state from the live spawn: HP (smoothed + damage-flash
+--- detection), name, fade/pop progress, mana/endurance where configured.
+---@param plate Plate
+---@param spawn spawn # live spawn TLO (already validated by the caller)
+---@param cfg NameplatesConfig # nameplates settings
+---@param timeNow number # frame timebase
+---@param dt number # frame delta (FRAME_DT)
 local function update_live(plate, spawn, cfg, timeNow, dt)
   local hp = (spawn.PctHPs() or 0) / 100
 
@@ -211,8 +230,15 @@ local function update_live(plate, spawn, cfg, timeNow, dt)
   end
 end
 
--- Plates are gathered first, then drawn far -> near (painter's algorithm)
--- so closer mobs' plates overlap farther ones; your target always draws last.
+--- One frame of plates: refresh occluder rects, compute the in-flight AE
+--- areas, update every live plate (position/HP/AE marks/occlusion), then
+--- draw far -> near (painter's algorithm) so closer plates overlap farther
+--- ones - my own plate on top, then my target, then everyone by distance.
+--- Plates overlapping EQ windows draw clipped per visible sub-rect.
+---@param drawList ImDrawList # the fullscreen overlay window's draw list
+---@param cfg NameplatesConfig # nameplates settings
+---@param timeNow number # frame timebase
+---@param dt number # frame delta (FRAME_DT)
 local function draw_plates(drawList, cfg, timeNow, dt)
   if cfg.hideUnderUI and uirects.native then
     -- native rects every frame; an empty result only counts once native has
@@ -230,7 +256,7 @@ local function draw_plates(drawList, cfg, timeNow, dt)
     local isTarget = (id == tgtID)
     if not plate.lostAt then
       -- LIVE read every frame -> plates track movement exactly.
-      local spawn = mq.TLO.Spawn(id)
+      local spawn = mq.TLO.Spawn(id) --[[@as spawn]]
       if spawn.ID() == id and spawn.X() then
         update_live(plate, spawn, cfg, timeNow, dt)
         local x, y, z = spawn.X(), spawn.Y(), spawn.Z()
@@ -466,22 +492,35 @@ log.Info('nameplates running. /npmenu, /npradius N, /nppcs, /npdebug, /npui')
 -- (SpellID -> Spell.ID etc.) and pcall-guarded.
 local buffScanWarned = false
 
+--- pcall a TLO getter, keep the result only when it's a number.
+---@param f fun(): any
+---@return number|nil
 local function getn(f)
   local okk, v = pcall(f)
   if okk and type(v) == 'number' then return v end
 end
 
+--- pcall a TLO getter, coerce to boolean (nil = the call itself failed).
+---@param f fun(): any
+---@return boolean|nil
 local function getbool(f)
   local okk, v = pcall(f)
   if okk then return v and true or false end
   return nil
 end
 
+--- pcall a TLO getter, keep the result only when it's a non-empty string.
+---@param f fun(): any
+---@return string|nil
 local function getstr(f)
   local okk, v = pcall(f)
   if okk and type(v) == 'string' and v ~= '' then return v end
 end
 
+--- Case-insensitive membership test against a list of names.
+---@param list string[]|nil
+---@param key string # ALREADY lowercased
+---@return boolean
 local function list_has(list, key)
   for _, v in ipairs(list or {}) do
     if tostring(v):lower() == key then return true end
@@ -489,7 +528,11 @@ local function list_has(list, key)
   return false
 end
 
--- Scan-time filtering + override resolution. Returns false to drop the buff.
+--- Scan-time buff filtering + override resolution (hide/whitelist/blacklist/
+--- mineOnly), and stamps entry.scale/prio from the per-buff overrides.
+---@param buffCfg NpBuffsCfg # cfg.buffs
+---@param entry BuffEntry
+---@return boolean keep # false = drop the buff
 local function apply_buff_rules(buffCfg, entry)
   local key = (entry.name or ''):lower()
   local ov = buffCfg.overrides[key]
@@ -506,7 +549,9 @@ local function apply_buff_rules(buffCfg, entry)
   return true
 end
 
--- Higher priority first (they also survive the maxIcons cap), stable order.
+--- Sort buffs in place: higher priority first (they also survive the
+--- maxIcons cap), original order as the stable tiebreaker.
+---@param lst BuffEntry[]
 local function sort_buffs(lst)
   for n, entry in ipairs(lst) do entry._i = n end
   table.sort(lst, function(x, y)
@@ -515,6 +560,13 @@ local function sort_buffs(lst)
   end)
 end
 
+--- Rebuild a plate's buff lists. Self uses Me.Buff (always available);
+--- other spawns use Spawn.Buff with a CachedBuff('*i') fallback - cached
+--- data only exists for spawns you've targeted at least once. Getters are
+--- chained + pcall-guarded because member names differ across MQ builds.
+---@param plate Plate # buffsB/buffsD replaced
+---@param spawn spawn # live spawn TLO
+---@param isSelf boolean
 local function refresh_buffs(plate, spawn, isSelf)
   local buffCfg = (settings.data or {}).buffs
   local myName = mq.TLO.Me.CleanName() or ''
@@ -580,9 +632,15 @@ local function refresh_buffs(plate, spawn, isSelf)
 end
 
 
--- Only real creatures get plates. The plain radius spawn search also returns
--- auras, campfires, banners, totems, corpses, traps... - all filtered here.
--- Also returns the spawn category (the AE highlight's eligibility key).
+--- Only real creatures get plates. The plain radius spawn search also
+--- returns auras, campfires, banners, totems, corpses, traps... - all
+--- filtered here.
+---@param cfg NameplatesConfig # nameplates settings (show.*)
+---@param spawn spawn # candidate spawn TLO
+---@param id integer # its spawn ID
+---@param myID integer|nil # my spawn ID
+---@return boolean allow # show a plate for it?
+---@return string kind # spawn category: 'npc'|'pc'|'pet'|'merc'|'other' (the AE highlight's eligibility key)
 local function allowed(cfg, spawn, id, myID)
   if id == myID then return cfg.show.self, 'pc' end
   local t = spawn.Type()
@@ -593,6 +651,10 @@ local function allowed(cfg, spawn, id, myID)
   return false, 'other'
 end
 
+--- Slow-loop plate discovery: radius spawn search decides WHICH spawns get
+--- plates (create/revive/expire), refreshes group membership, spawn kinds
+--- and buff lists. Positions are NOT read here - the draw callback does
+--- that live every frame.
 local function discover()
   local cfg = settings.data or {}
   local myID = mq.TLO.Me.ID()
@@ -610,7 +672,7 @@ local function discover()
 
   local cnt = mq.TLO.SpawnCount(spec)() or 0
   for i = 1, cnt do
-    local spawn = mq.TLO.NearestSpawn(string.format('%d, %s', i, spec))
+    local spawn = mq.TLO.NearestSpawn(string.format('%d, %s', i, spec)) --[[@as spawn]]
     if spawn() and spawn.X() then
       local id = spawn.ID()
       local allow, kind = allowed(cfg, spawn, id, myID)

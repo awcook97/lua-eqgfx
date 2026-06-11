@@ -51,6 +51,9 @@ local function safe_tlo(fn)
   return nil
 end
 
+--- Settings file path for a scope (char/server names read live from TLOs).
+---@param scope string # 'char' | 'server' | 'global'
+---@return string path # absolute file path under <config>/eqgfx/
 local function path_for(scope)
   if scope == 'global' then return DIR .. '/global_settings.lua' end
   local server = sanitize(safe_tlo(function() return mq.TLO.EverQuest.Server() end))
@@ -70,7 +73,9 @@ local function ensure_dir()
   end
 end
 
--- Read a settings file -> table, or nil (quietly) if missing/invalid.
+--- Read a settings file -> table, or nil (quietly) if missing/invalid.
+---@param path string
+---@return table|nil settings
 local function read_file(path)
   local chunk = loadfile(path)
   if not chunk then return nil end
@@ -141,8 +146,11 @@ local function remove_section(path, section)
   else write_file(path, whole) end
 end
 
--- Fill any keys missing from a loaded config with defaults (so new fields
--- appear on upgrade). Recurses into nested tables.
+--- Fill any keys missing from a loaded config with defaults (so new fields
+--- appear on upgrade). Recurses into nested tables; existing values win.
+---@param dst table|nil # loaded (possibly partial) config
+---@param def table # the defaults to backfill from
+---@return table dst # the merged table (same identity as dst when it was a table)
 local function merge_defaults(dst, def)
   dst = (type(dst) == 'table') and dst or {}
   for k, v in pairs(def) do
@@ -172,8 +180,19 @@ M.merge_defaults = merge_defaults
 ---@field maybe_save fun(log?: table)
 ---@field set_scope fun(scope: string, log?: table)
 
----@param opts { section: string, defaults: table, legacy: string|nil }
----@return SettingsStore
+--- Create a scoped settings store for your script. All features (and your
+--- own scripts) share the same three files; each store owns one section.
+---
+--- ```lua
+--- local Store = require('eqgfx.lib.settings')
+--- local settings = Store.new{ section = 'myscript', defaults = { radius = 50 } }
+--- settings.load()
+--- settings.data.radius = 75
+--- settings.mark_dirty()
+--- settings.maybe_save()    -- call every loop pass; writes only when dirty
+--- ```
+---@param opts { section: string, defaults: table, legacy: string|nil } # legacy = old single-file config to import once
+---@return SettingsStore store
 function M.new(opts)
   local self = {
     section  = assert(opts.section, 'settings store needs a section name'),
@@ -186,6 +205,10 @@ function M.new(opts)
   self.data = merge_defaults({}, self.defaults)
   local dirty = false
 
+  --- Load the section: checks character -> server -> global files, merges
+  --- defaults over what it finds, and sets the store's scope to wherever the
+  --- section lived. Call once at script start.
+  ---@return table data # the live settings table (also self.data)
   function self.load()
     local found, level
     for _, sc in ipairs(M.SCOPES) do
@@ -203,6 +226,10 @@ function M.new(opts)
     return self.data
   end
 
+  --- Write the section to the current scope's file immediately (read-modify-
+  --- write; other sections in the file are preserved). Prefer maybe_save().
+  ---@param log table|nil # lwlogger-style module for failure warnings
+  ---@return boolean ok
   function self.save(log)
     local target = path_for(self.scope)
     local whole = read_file(target) or {}
@@ -212,10 +239,13 @@ function M.new(opts)
     return okk
   end
 
+  --- Flag the settings as changed; the next maybe_save() writes them.
+  --- Call after every mutation of self.data (menu widgets do this).
   function self.mark_dirty() dirty = true end
 
-  -- Save whenever dirty; call every loop pass. No time debounce - writes
-  -- only happen when something actually changed.
+  --- Save if dirty, else do nothing. Call every loop pass - no time
+  --- debounce needed since writes only happen when something changed.
+  ---@param log table|nil # lwlogger-style module for failure warnings
   function self.maybe_save(log)
     if dirty then
       self.save(log)
@@ -223,8 +253,11 @@ function M.new(opts)
     end
   end
 
-  -- Change save scope. Removes this section from files more specific than
-  -- the new scope (so the new file actually takes effect) and saves now.
+  --- Change save scope ('char'/'server'/'global'). Removes this section from
+  --- files more specific than the new scope (so the new file actually takes
+  --- effect) and saves immediately.
+  ---@param scope string # 'char' | 'server' | 'global'
+  ---@param log table|nil # lwlogger-style module
   function self.set_scope(scope, log)
     if scope == self.scope then return end
     self.scope = scope

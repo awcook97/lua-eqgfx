@@ -13,6 +13,10 @@
 local Store = require('eqgfx.lib.settings')
 local types = require('eqgfx.nameplates._types')
 
+-- The defaults, checked against the NameplatesConfig classes declared in
+-- nameplates/_types.lua - a field added here without a matching @field there
+-- (or vice versa) is a diagnostic, so the docs can't silently drift.
+---@type NameplatesConfig
 local DEFAULTS = {
   enabled     = true,
   radius      = 200,
@@ -185,4 +189,9 @@ local DEFAULTS = {
   },
 }
 
-return Store.new{ section = 'nameplates', defaults = DEFAULTS }
+--- The nameplates settings store: a SettingsStore whose .data is typed as
+--- the NameplatesConfig tree.
+---@class NameplatesStore: SettingsStore
+---@field data NameplatesConfig
+
+return Store.new({ section = 'nameplates', defaults = DEFAULTS }) --[[@as NameplatesStore]]
