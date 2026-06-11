@@ -12,39 +12,39 @@ function M.toggle() M.open = not M.open end
 local function mark() settings.mark_dirty() end
 
 local function check(label, key)
-  local S = settings.data
-  local v, pressed = ImGui.Checkbox(label, S[key])
-  if pressed then S[key] = v; mark() end
+  local cfg = settings.data
+  local v, pressed = ImGui.Checkbox(label, cfg[key])
+  if pressed then cfg[key] = v; mark() end
 end
 
 -- Keep colors as plain number tables (pickle-safe) regardless of what the
 -- binding hands back (table vs ImVec4).
-local function to_color(c)
-  if type(c) == 'table' then return { c[1], c[2], c[3], c[4] } end
-  return { c.x, c.y, c.z, c.w }
+local function to_color(colorVal)
+  if type(colorVal) == 'table' then return { colorVal[1], colorVal[2], colorVal[3], colorVal[4] } end
+  return { colorVal.x, colorVal.y, colorVal.z, colorVal.w }
 end
 
 local function color(label, key)
-  local S = settings.data
-  local c, changed = ImGui.ColorEdit4(label, S.colors[key])
-  if changed then S.colors[key] = to_color(c); mark() end
+  local cfg = settings.data
+  local colorVal, changed = ImGui.ColorEdit4(label, cfg.colors[key])
+  if changed then cfg.colors[key] = to_color(colorVal); mark() end
 end
 
 local function slideri(label, key, lo, hi)
-  local S = settings.data
-  local v, changed = ImGui.SliderInt(label, S[key], lo, hi)
-  if changed then S[key] = v; mark() end
+  local cfg = settings.data
+  local v, changed = ImGui.SliderInt(label, cfg[key], lo, hi)
+  if changed then cfg[key] = v; mark() end
 end
 
 local function sliderf(label, key, lo, hi)
-  local S = settings.data
-  local v, changed = ImGui.SliderFloat(label, S[key], lo, hi, '%.1f')
-  if changed then S[key] = v; mark() end
+  local cfg = settings.data
+  local v, changed = ImGui.SliderFloat(label, cfg[key], lo, hi, '%.1f')
+  if changed then cfg[key] = v; mark() end
 end
 
 function M.draw()
   if not M.open then return end
-  local S = settings.data
+  local cfg = settings.data
   local open, show = ImGui.Begin('EQGFX Spell Indicators', M.open)
   M.open = open
   if show then
@@ -56,7 +56,7 @@ function M.draw()
     ImGui.SameLine()
     if ImGui.RadioButton('All characters', settings.scope == 'global') then settings.set_scope('global') end
     ImGui.Separator()
-    ImGui.Text('Mob casts detected within ~%d units (anim limit ~400).', S.radius)
+    ImGui.Text('Mob casts detected within ~%d units (anim limit ~400).', cfg.radius)
     slideri('Detection radius', 'radius', 20, 400)
     sliderf('Ground offset', 'groundOffset', 0.0, 15.0)
     ImGui.Separator()

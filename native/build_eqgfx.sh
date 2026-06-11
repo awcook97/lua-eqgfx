@@ -35,9 +35,16 @@ done
 export WINEPATH="$FIXED_WINEPATH"
 
 # /MT static CRT to match MQ; /EHsc for C++; /LD builds a DLL.
+# Link to a temp name, then rename over the target: renaming is safe even if
+# a running EQ client still has the old eqgfx.dll mapped, while overwriting
+# in place corrupts the mapped image (instant client-side crashes). A game
+# restart is still required to LOAD the new DLL - but the old session keeps
+# working untouched.
 wine cl /nologo /O2 /MT /EHsc /std:c++17 /W3 /D_CRT_SECURE_NO_DEPRECATE \
     /LD "z:${HERE}/eqgfx.cpp" \
-    /link /MACHINE:X64 /OUT:"z:${OUT}/eqgfx.dll"
+    /link /MACHINE:X64 /OUT:"z:${OUT}/eqgfx.dll.new"
 
-echo "Built: ${OUT}/eqgfx.dll"
+mv -f "${OUT}/eqgfx.dll.new" "${OUT}/eqgfx.dll"
+
+echo "Built: ${OUT}/eqgfx.dll  (restart EQ to load it if the game is running)"
 file "${OUT}/eqgfx.dll" 2>/dev/null || true

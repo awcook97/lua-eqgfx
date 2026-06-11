@@ -4,6 +4,8 @@
 
 local A = {}
 
+---@param t number
+---@return number
 function A.clamp01(t)
   if t < 0 then return 0 elseif t > 1 then return 1 end
   return t
@@ -12,6 +14,11 @@ end
 function A.lerp(a, b, t) return a + (b - a) * t end
 
 -- Exponential approach: move cur toward target at `speed` per second.
+---@param cur number
+---@param target number
+---@param speed number
+---@param dt number
+---@return number
 function A.approach(cur, target, speed, dt)
   return cur + (target - cur) * math.min(1, dt * speed)
 end
@@ -30,17 +37,25 @@ function A.ease_out_back(t)
 end
 
 -- 1 -> 0 sawtooth over dur (for flashes / fades); nil-safe.
-function A.fade(startedAt, dur, now)
+---@param startedAt number|nil
+---@param dur number
+---@param timeNow number
+---@return number
+function A.fade(startedAt, dur, timeNow)
   if not startedAt or dur <= 0 then return 0 end
-  return 1 - A.clamp01((now - startedAt) / dur)
+  return 1 - A.clamp01((timeNow - startedAt) / dur)
 end
 
 -- Gentle 0..1 sine pulse.
-function A.pulse(now, period)
-  return 0.5 + 0.5 * math.sin(now * (2 * math.pi) / (period or 0.4))
+function A.pulse(timeNow, period)
+  return 0.5 + 0.5 * math.sin(timeNow * (2 * math.pi) / (period or 0.4))
 end
 
 -- Lerp two {r,g,b,a} float colors into a new table.
+---@param c1 number[]
+---@param c2 number[]
+---@param t number
+---@return number[]
 function A.lerp_color(c1, c2, t)
   return { A.lerp(c1[1], c2[1], t), A.lerp(c1[2], c2[2], t),
            A.lerp(c1[3], c2[3], t), A.lerp(c1[4], c2[4], t) }

@@ -4,8 +4,8 @@
   Spawn.Casting is only accurate for YOURSELF, so other spawns' casts are
   detected from the "<name> begins to cast <spell>" chat line (with the spell
   link kept), and progress is computed as time elapsed since the event against
-  the spell's CastTime. The caster name is resolved to a spawn ID by preferring
-  nearby spawns showing a casting animation.
+  the spell's CastTime. The caster name is resolved to cast spawn ID by preferring
+  nearby spawns showing cast casting animation.
 
   Each running script gets its own copy of this state (MQ Lua states are
   isolated), so nameplates and indicators can both use it independently.
@@ -15,8 +15,8 @@
     casts.init{ log = log, trackSelf = true }
     -- main loop (after mq.doevents()):
     casts.update(os.clock())
-    local ci = casts.get(spawnID)        -- CastInfo or nil
-    local pct, remain = casts.progress(ci, os.clock())
+    local castInfo = casts.get(spawnID)        -- CastInfo or nil
+    local pct, remain = casts.progress(castInfo, os.clock())
 ]]
 
 local mq    = require('mq')
@@ -26,7 +26,7 @@ local CAST_ANIMS = types.CAST_ANIMS
 
 local M = { CAST_ANIMS = CAST_ANIMS }
 
-local cfg = {
+local trackerCfg = {
   log             = nil,    -- lwlogger-style module (Info/Warn/Debug)
   trackSelf       = true,   -- include your own casts (via Me.Casting)
   interruptDetect = true,   -- drop NPC casts whose cast animation stops early
@@ -40,7 +40,7 @@ local registered    = false
 local selfSpellID   = nil
 
 local function dbg(fmt, ...)
-  if cfg.log then cfg.log.Debug(fmt, ...) end
+  if trackerCfg.log then trackerCfg.log.Debug(fmt, ...) end
 end
 
 local function spell_icon(spellID)
@@ -64,21 +64,34 @@ local function resolve_caster(name)
   local cnt = mq.TLO.SpawnCount('npc ' .. name)() or 0
   local fallback = nil
   for i = 1, cnt do
-    local sp = mq.TLO.NearestSpawn(string.format('%d, npc %s', i, name))
-    if sp() and sp.ID() and sp.ID() > 0 then
-      if CAST_ANIMS[sp.Animation()] then return sp end
-      fallback = fallback or sp
+    local spawn = mq.TLO.NearestSpawn(string.format('%d, npc %s', i, name))
+    if spawn() and spawn.ID() and spawn.ID() > 0 then
+      if CAST_ANIMS[spawn.Animation()] then return spawn end
+      fallback = fallback or spawn
     end
   end
   if fallback then return fallback end
-  local sp = mq.TLO.Spawn('npc ' .. name)
-  if sp() and sp.ID() and sp.ID() > 0 then return sp end
-  sp = mq.TLO.Spawn('pc =' .. name)                 -- other players cast too
-  if sp() and sp.ID() and sp.ID() > 0 then return sp end
+  local spawn = mq.TLO.Spawn('npc ' .. name)
+  if spawn() and spawn.ID() and spawn.ID() > 0 then return spawn end
+  spawn = mq.TLO.Spawn('pc =' .. name)                 -- other players cast too
+  if spawn() and spawn.ID() and spawn.ID() > 0 then return spawn end
   return nil
 end
 
--- Chat event: stash a pending cast keyed by caster name + spell link's id.
+-- Build + register an active cast for a resolved spawn.
+local function activate(spawn, casterName, spellID, spellName, timeNow)
+  local id = spawn.ID()
+  local castInfo = types.CastInfo(id, casterName, spellID, spellName,
+                                  cast_seconds(spellID), false, timeNow)
+  castInfo.spellIcon = spell_icon(spellID)
+  if CAST_ANIMS[spawn.Animation()] then castInfo.sawAnim, castInfo.lastAnimAt = true, timeNow end
+  active[id] = castInfo
+end
+
+-- Chat event: resolve the caster IMMEDIATELY (handlers run inside
+-- mq.doevents, so the cast bar exists the instant the line arrives - no
+-- waiting on the next tracker update). Unresolvable names go to pending
+-- and get retried from update().
 local function on_cast(line, casterName)
   if not casterName or casterName == '' then return end
   if casterName == (mq.TLO.Me.CleanName() or '') then return end  -- self via Me.Casting
@@ -94,18 +107,25 @@ local function on_cast(line, casterName)
       end
     end
   end
-  pendingByName[casterName] = { spellID = spellID, spellName = spellName, at = os.clock() }
-  dbg('cast evt: "%s" -> %s (id=%s)', casterName, tostring(spellName), tostring(spellID))
+
+  local spawn = resolve_caster(casterName)
+  if spawn and spawn.ID() and spawn.ID() > 0 then
+    activate(spawn, casterName, spellID, spellName, os.clock())
+    dbg('cast evt (instant): "%s" -> %s', casterName, tostring(spellName))
+  else
+    pendingByName[casterName] = { spellID = spellID, spellName = spellName, at = os.clock() }
+    dbg('cast evt (pending): "%s" -> %s', casterName, tostring(spellName))
+  end
 end
 
 -- Interrupt lines name the caster directly - far more reliable than the
 -- animation heuristic (which needs the spawn close enough to see the anim).
 local function on_interrupt(name)
   if not name or name == '' then return end
-  local now = os.clock()
-  for _, a in pairs(active) do
-    if not a.isSelf and not a.interrupted and a.casterName == name then
-      a.interrupted, a.interruptedAt = true, now
+  local timeNow = os.clock()
+  for _, cast in pairs(active) do
+    if not cast.isSelf and not cast.interrupted and cast.casterName == name then
+      cast.interrupted, cast.interruptedAt = true, timeNow
       dbg('cast interrupted (event): %s', name)
     end
   end
@@ -114,7 +134,7 @@ end
 
 ---@param opts table|nil  overrides for cfg fields (log, trackSelf, ...)
 function M.init(opts)
-  if opts then for k, v in pairs(opts) do cfg[k] = v end end
+  if opts then for k, v in pairs(opts) do trackerCfg[k] = v end end
   if registered then return end
   registered = true
   -- "begins to cast a spell." and "begins casting <spell>." - the named/link
@@ -130,73 +150,75 @@ end
 
 -- Runtime toggles (settings menus call this).
 function M.config(opts)
-  for k, v in pairs(opts) do cfg[k] = v end
+  for k, v in pairs(opts) do trackerCfg[k] = v end
 end
 
-local function update_self(now)
+local function update_self(timeNow)
   local myid = mq.TLO.Me.ID()
   if not myid or myid <= 0 then return end
   local sc = mq.TLO.Me.Casting.ID()
   if sc and sc > 0 then
     if selfSpellID ~= sc then
       selfSpellID = sc
-      local ci = types.CastInfo(myid, mq.TLO.Me.CleanName() or 'me', sc,
-                                mq.TLO.Spell(sc).Name(), cast_seconds(sc), true, now)
-      ci.spellIcon = spell_icon(sc)
-      active[myid] = ci
+      local castInfo = types.CastInfo(myid, mq.TLO.Me.CleanName() or 'me', sc,
+                                mq.TLO.Spell(sc).Name(), cast_seconds(sc), true, timeNow)
+      castInfo.spellIcon = spell_icon(sc)
+      active[myid] = castInfo
     end
   else
     selfSpellID = nil
-    local a = active[myid]
-    if a and a.isSelf and not a.done then
-      a.done = true
+    local cast = active[myid]
+    if cast and cast.isSelf and not cast.done then
+      cast.done = true
       -- ended early -> interrupted; otherwise linger for the finish pulse.
-      if now < a.startedAt + a.duration - 0.25 then
-        a.interrupted, a.interruptedAt = true, now
+      if timeNow < cast.startedAt + cast.duration - 0.25 then
+        cast.interrupted, cast.interruptedAt = true, timeNow
       end
     end
   end
 end
 
-function M.update(now)
-  if cfg.trackSelf then update_self(now) end
+-- The cast tracker is the single place real time exists: spell durations
+-- are wall-clock seconds, so progress/expiry need an actual clock.
+function M.now()
+  return os.clock()
+end
 
-  -- Resolve pending casts (name -> spawn id) and create active entries.
-  for name, p in pairs(pendingByName) do
-    local sp = resolve_caster(name)
-    if sp and sp.ID() and sp.ID() > 0 then
-      local id = sp.ID()
-      local ci = types.CastInfo(id, name, p.spellID, p.spellName,
-                                cast_seconds(p.spellID), false, now)
-      ci.spellIcon = spell_icon(p.spellID)
-      if CAST_ANIMS[sp.Animation()] then ci.sawAnim, ci.lastAnimAt = true, now end
-      active[id] = ci
+function M.update()
+  local timeNow = os.clock()
+  if trackerCfg.trackSelf then update_self(timeNow) end
+
+  -- Retry casts whose caster couldn't be resolved at event time.
+  for name, pending in pairs(pendingByName) do
+    local spawn = resolve_caster(name)
+    if spawn and spawn.ID() and spawn.ID() > 0 then
+      activate(spawn, name, pending.spellID, pending.spellName, timeNow)
       pendingByName[name] = nil
-    elseif now - p.at > 3 then
+    elseif timeNow - pending.at > 3 then
       pendingByName[name] = nil
     end
   end
 
   -- Interrupt heuristic + expiry.
-  for id, a in pairs(active) do
-    if not a.isSelf and not a.interrupted and cfg.interruptDetect then
-      local sp = mq.TLO.Spawn(id)
-      if sp.ID() == id then
-        local anim = sp.Animation()
+  for id, cast in pairs(active) do
+    if not cast.isSelf and not cast.interrupted and trackerCfg.interruptDetect then
+      local spawn = mq.TLO.Spawn(id)
+      if spawn.ID() == id then
+        local anim = spawn.Animation()
         if CAST_ANIMS[anim] then
-          a.sawAnim, a.lastAnimAt = true, now
-        elseif a.sawAnim and a.lastAnimAt
-           and now - a.lastAnimAt > 0.3
-           and now < a.startedAt + a.duration - 0.2 then
-          a.interrupted, a.interruptedAt = true, now
-          dbg('cast interrupted: %s (%s)', a.casterName, tostring(a.spellName))
+          cast.sawAnim, cast.lastAnimAt = true, timeNow
+        elseif cast.sawAnim and cast.lastAnimAt
+           and timeNow - cast.lastAnimAt > 0.3
+           and timeNow < cast.startedAt + cast.duration - 0.2 then
+          cast.interrupted, cast.interruptedAt = true, timeNow
+          dbg('cast interrupted: %s (%s)', cast.casterName, tostring(cast.spellName))
         end
       end
     end
 
-    if a.interrupted then
-      if now > (a.interruptedAt or now) + cfg.interruptLinger then active[id] = nil end
-    elseif now > a.startedAt + a.duration + cfg.grace then
+    if cast.interrupted then
+      if timeNow > (cast.interruptedAt or timeNow) + trackerCfg.interruptLinger then active[id] = nil end
+    elseif timeNow > cast.startedAt + cast.duration + trackerCfg.grace then
       active[id] = nil
     end
   end
@@ -212,11 +234,11 @@ function M.all() return active end
 ---@param ci CastInfo
 ---@param now number
 ---@return number pct, number remain
-function M.progress(ci, now)
-  local elapsed = now - ci.startedAt
-  local pct = (ci.duration > 0) and (elapsed / ci.duration) or 1
+function M.progress(castInfo, timeNow)
+  local elapsed = timeNow - castInfo.startedAt
+  local pct = (castInfo.duration > 0) and (elapsed / castInfo.duration) or 1
   if pct < 0 then pct = 0 elseif pct > 1 then pct = 1 end
-  local remain = ci.duration - elapsed
+  local remain = castInfo.duration - elapsed
   if remain < 0 then remain = 0 end
   return pct, remain
 end

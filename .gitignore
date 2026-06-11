@@ -5,3 +5,5 @@
 *.pdb
 *.ilk
 # eqgfx.dll
+# per-build hot-load copies (core/init.lua)
+eqgfx_run_*.dll

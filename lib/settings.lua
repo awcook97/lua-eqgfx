@@ -24,7 +24,7 @@
     local settings = Store.new{ section = 'nameplates', defaults = DEFAULTS }
     settings.load()
     settings.data.foo = 42; settings.mark_dirty()
-    settings.maybe_save(os.clock(), log)   -- debounced; call every loop tick
+    settings.maybe_save(log)               -- saves only when dirty
     settings.set_scope('server')           -- 'char' | 'server' | 'global'
 ]]
 
@@ -160,7 +160,20 @@ M.merge_defaults = merge_defaults
 -- Store instances (closure-based: callers use dot-call).
 ----------------------------------------------------------------------------
 
+---@class SettingsStore
+---@field section string
+---@field defaults table
+---@field legacy string|nil
+---@field data table|nil      live settings (after load)
+---@field scope string        'char' | 'server' | 'global'
+---@field load fun(): table
+---@field save fun(log?: table): boolean
+---@field mark_dirty fun()
+---@field maybe_save fun(log?: table)
+---@field set_scope fun(scope: string, log?: table)
+
 ---@param opts { section: string, defaults: table, legacy: string|nil }
+---@return SettingsStore
 function M.new(opts)
   local self = {
     section  = assert(opts.section, 'settings store needs a section name'),
@@ -169,7 +182,7 @@ function M.new(opts)
     data     = nil,
     scope    = 'char',
   }
-  local dirty, lastSave = false, 0
+  local dirty = false
 
   function self.load()
     local found, level
@@ -199,11 +212,12 @@ function M.new(opts)
 
   function self.mark_dirty() dirty = true end
 
-  -- Debounced save; call every loop tick.
-  function self.maybe_save(now, log)
-    if dirty and now - lastSave > 1.0 then
+  -- Save whenever dirty; call every loop pass. No time debounce - writes
+  -- only happen when something actually changed.
+  function self.maybe_save(log)
+    if dirty then
       self.save(log)
-      dirty, lastSave = false, now
+      dirty = false
     end
   end
 

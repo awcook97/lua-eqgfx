@@ -60,6 +60,11 @@ ffi.cdef[[
   void eqgfx_add_screen_rect(float x0, float y0, float x1, float y1, uint32_t color);
   void eqgfx_world_to_screen(float x, float y, float z, float* sx, float* sy, int* visible);
   void eqgfx_project(float x, float y, float z, float* sx, float* sy, int* infront);
+  void eqgfx_set_ui_names(const char* newlineSeparated);
+  int  eqgfx_ui_available();
+  int  eqgfx_ui_find_mode();
+  const char* eqgfx_build();
+  int  eqgfx_get_ui_rects(float* out, int maxRects);
 ]]
 
 -- Optional hard override for the DLL location (Windows-style path). Normally
@@ -78,16 +83,69 @@ local function locate_dll()
   return 'eqgfx'                                   -- fall back to OS search path
 end
 
+-- Fingerprinted hot-loading: Windows returns the ALREADY-MAPPED module when
+-- the same path is loaded again, so a rebuilt eqgfx.dll would silently keep
+-- running old code until the game restarts. Instead the dll is copied to a
+-- per-build name (eqgfx_run_<size>_<hash>.dll) and THAT is loaded - a fresh
+-- /lua run always gets the newest build, no game restart required.
+local function file_fingerprint(path)
+  local f = io.open(path, 'rb')
+  if not f then return nil end
+  local size = f:seek('end') or 0
+  if size > 4096 then f:seek('set', size - 4096) else f:seek('set', 0) end
+  local sample = f:read(4096) or ''
+  f:close()
+  local h = 5381
+  for idx = 1, #sample, 7 do
+    h = (h * 33 + sample:byte(idx)) % 4294967291
+  end
+  return string.format('%x_%x', size, h)
+end
+
+local function hot_copy_path(base)
+  local fp = file_fingerprint(base)
+  if not fp then return base end
+  local dir = base:gsub('[^/\\]+$', '')
+  local cached = dir .. 'eqgfx_run_' .. fp .. '.dll'
+  local probe = io.open(cached, 'rb')
+  if probe then probe:close() return cached end
+  local src = io.open(base, 'rb')
+  if not src then return base end
+  local dst = io.open(cached, 'wb')
+  if not dst then src:close() return base end
+  dst:write(src:read('*a'))
+  src:close()
+  dst:close()
+  -- best-effort cleanup of older run copies (loaded ones refuse deletion)
+  pcall(function()
+    local lfs = require('lfs')
+    for name in lfs.dir(dir) do
+      if name:match('^eqgfx_run_.*%.dll$') and dir .. name ~= cached then
+        pcall(os.remove, dir .. name)
+      end
+    end
+  end)
+  return cached
+end
+
 local eqlib = ffi.load('eqlib')                    -- already in-process; read its exports
 local lib
 do
-  local path = locate_dll()
+  local base = locate_dll()
+  local path = hot_copy_path(base)
   local okk, l = pcall(ffi.load, path)
-  if not okk then okk, l = pcall(ffi.load, 'eqgfx') end   -- fall back to PATH/name
+  if not okk then okk, l = pcall(ffi.load, base) end       -- fall back to base path
+  if not okk then okk, l = pcall(ffi.load, 'eqgfx') end    -- then OS search path
   if not okk then error('[eqgfx] could not load eqgfx.dll (tried: ' .. tostring(path) .. ')') end
   lib = l
 end
 
+---@class Eqgfx
+---@field ui_native boolean|nil  native window enumeration available
+---@field dll_stale boolean|nil  loaded DLL predates the one on disk
+---@field TargetType table<string, integer>
+
+---@type Eqgfx|table
 local M = {}
 local geom = ffi.new('eqgfx_spell_geom')
 
@@ -112,7 +170,35 @@ function M.init()
   end
   local pd = deref_inst(eqlib.pinstCDisplay)         -- CDisplay -> active camera
   if pd then lib.eqgfx_set_display(pd) end
+  -- CXWndManager -> native UI window enumeration (older eqlib builds may not
+  -- export it; everything degrades to the Lua-side Window TLO scan).
+  -- Native UI enumeration: the DLL resolves FindMQ2Window / CXWnd methods
+  -- BY NAME from MQ2Main.dll / eqlib.dll exports - no struct offsets. If the
+  -- loaded eqgfx.dll predates these exports (game launched before a rebuild),
+  -- flag it so scripts tell the user to restart EQ instead of failing quietly.
+  M.ui_native = false
+  M.dll_stale = not pcall(function() return lib.eqgfx_ui_available end)
+  if not M.dll_stale then
+    M.ui_native = lib.eqgfx_ui_available() == 1
+  end
   return true
+end
+
+-- Compile stamp of the LOADED dll (vs whatever is on disk).
+function M.build()
+  local okk, v = pcall(function() return ffi.string(lib.eqgfx_build()) end)
+  return okk and v or 'pre-2026-06-10 (stale - restart EQ)'
+end
+
+-- FindMQ2Window ABI variant in use (0 none/unprobed, 1 char*, 2 string_view).
+function M.ui_find_mode()
+  local okk, v = pcall(function() return lib.eqgfx_ui_find_mode() end)
+  return okk and v or -1
+end
+
+-- Candidate window names for the native UI scan (newline-joined internally).
+function M.set_ui_names(names)
+  pcall(function() lib.eqgfx_set_ui_names(table.concat(names, '\n')) end)
 end
 
 function M.shutdown() lib.eqgfx_shutdown() end
@@ -199,6 +285,21 @@ local _px, _py, _pf = ffi.new('float[1]'), ffi.new('float[1]'), ffi.new('int[1]'
 function M.project(x, y, z)
   lib.eqgfx_project(x, y, z, _px, _py, _pf)
   return tonumber(_px[0]), tonumber(_py[0]), _pf[0] ~= 0
+end
+
+-- Visible, top-level, non-minimized native EQ window rects, straight from
+-- CXWndManager. Returns an array of {x0, y0, x1, y1}, or nil when the native
+-- path is unavailable.
+local _uiBuf = ffi.new('float[512]')   -- 128 rects max
+function M.get_ui_rects()
+  if not M.ui_native then return nil end
+  local n = lib.eqgfx_get_ui_rects(_uiBuf, 128)
+  local t = {}
+  for i = 0, n - 1 do
+    t[i + 1] = { tonumber(_uiBuf[i * 4]),     tonumber(_uiBuf[i * 4 + 1]),
+                 tonumber(_uiBuf[i * 4 + 2]), tonumber(_uiBuf[i * 4 + 3]) }
+  end
+  return t
 end
 
 -- Returns a plain Lua table {targetType, range, aeRange, coneStart, coneEnd}

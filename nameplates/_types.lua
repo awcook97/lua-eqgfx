@@ -21,13 +21,17 @@ T.BuffDirection = { HORIZONTAL = 1, VERTICAL = 2 }
 T.BuffDirectionLabels = { 'Horizontal', 'Vertical' }
 
 ---@class BuffEntry
----@field id integer    spell ID
----@field icon integer  SpellIcon cell in the A_SpellIcons atlas
----@field ben boolean   beneficial?
----@field name string   spell name (lowercased matching for lists/overrides)
----@field mine boolean  cast by me?
----@field scale number  per-buff size multiplier (from overrides)
----@field prio number   sort priority (higher = first, survives the cap)
+---@field id integer        spell ID
+---@field icon integer      SpellIcon cell in the A_SpellIcons atlas
+---@field ben boolean       beneficial?
+---@field name string       spell name (lowercased matching for lists/overrides)
+---@field mine boolean      cast by me?
+---@field caster string|nil who cast it (tooltip)
+---@field dur number|nil    duration seconds (tooltip)
+---@field addedAt number|nil tick stamp when first seen (appear flash)
+---@field scale number|nil  per-buff size multiplier (from overrides)
+---@field prio number|nil   sort priority (higher = first, survives the cap)
+---@field _i integer|nil    stable-sort tiebreaker
 
 T.BuffFilterMode = { ALL = 1, WHITELIST = 2, BLACKLIST = 3 }
 T.BuffFilterLabels = { 'Show all', 'Whitelist only', 'Hide blacklisted' }
@@ -62,18 +66,28 @@ T.ResScopeLabels = { 'Off', 'Self only', 'Self + group', 'All PCs', 'Everything'
 ---@class Plate
 ---@field id integer
 ---@field name string
----@field dispHp number      smoothed HP fraction 0..1 (what the bar shows)
----@field lastHp number      last raw HP fraction (damage-flash detection)
----@field alpha number       current fade alpha 0..1
----@field scale number       current appear-pop scale
----@field bornAt number      os.clock() when the plate appeared
----@field lostAt number|nil  set when the spawn despawns / leaves range
----@field flashAt number|nil damage flash start time
----@field sx number|nil      last projected screen x (fade-out anchor)
----@field sy number|nil
+---@field dispHp number       smoothed HP fraction 0..1 (what the bar shows)
+---@field lastHp number       last raw HP fraction (damage-flash detection)
+---@field alpha number        current fade alpha 0..1
+---@field scale number        current appear-pop scale
+---@field bornAt number       frame-timebase stamp when the plate appeared
+---@field lostAt number|nil   set when the spawn despawns / leaves range
+---@field lossAlpha number|nil alpha at the moment the plate was lost
+---@field flashAt number|nil  damage flash start (frame timebase)
+---@field sx number|nil       last projected screen x (fade-out anchor)
+---@field sy number|nil       last projected screen y
+---@field dist number|nil     squared 3D distance to me (draw-order sort)
+---@field isPC boolean|nil    spawn type PC?
+---@field isSelf boolean|nil  this is my own plate
+---@field inGroup boolean|nil spawn is in my group
+---@field cls string|nil      class name (PC anonymization)
+---@field clsShort string|nil class short name
+---@field mana number|nil     0..1 when the mana bar applies
+---@field endu number|nil     0..1 when the endurance bar applies
 ---@field buffsB BuffEntry[]|nil  cached beneficial buffs
 ---@field buffsD BuffEntry[]|nil  cached detrimental buffs
----@field buffsAt number|nil      last cached-buff scan time
+---@field _scr string|nil     cached scrambled name
+---@field _scrFor string|nil  name the scramble cache was built for
 
 local Plate = {}
 T.Plate = Plate

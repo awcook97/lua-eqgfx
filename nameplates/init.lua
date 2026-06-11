@@ -39,6 +39,7 @@ local settings = require('eqgfx.nameplates.settings')
 local render   = require('eqgfx.nameplates.render')
 local menu     = require('eqgfx.nameplates.menu')
 local casts    = require('eqgfx.casts')
+local uirects  = require('eqgfx.lib.uirects')
 
 log.SetAppName('eqgfx')
 log.SetModuleName('nameplates')
@@ -50,8 +51,12 @@ log.SetOutputFile(mq.configDir .. '/eqgfx.log')
 
 local ok, err = eqgfx.init()
 if not ok then log.Error('init failed: %s', err) return end
+if eqgfx.dll_stale then
+  log.Warn('eqgfx.dll on disk is newer than the one loaded in this game session - restart EQ to load it (native UI occlusion disabled until then)')
+end
 
 settings.load()
+uirects.add_names(settings.data.extraWindows)
 casts.init{ log = log, trackSelf = true,
             interruptDetect = settings.data.castbar.interruptDetect }
 
@@ -59,56 +64,46 @@ casts.init{ log = log, trackSelf = true,
 local plates = {}
 
 ----------------------------------------------------------------------------
--- Native EQ UI occlusion. ImGui always composites ABOVE the game's own
--- windows, so the next best thing is hiding plates that would overlap an
--- open EQ window (rects via the Window TLO, rescanned every 0.3s).
+-- Native EQ UI occlusion - NATIVE ONLY. The compiled scan (named exports,
+-- full window list per call) is the single source of occluder rects. There
+-- is NO Lua-side window sweep: a TLO fallback was measured stalling the
+-- script loop for hundreds of ms per pass, which starved mq.doevents() and
+-- lagged cast detection by seconds. If the loaded eqgfx.dll can't do the
+-- native scan, occlusion is OFF and we say so loudly - the loop stays fast.
 ----------------------------------------------------------------------------
-local EQ_WINDOWS = {
-  'OptionsWindow', 'InventoryWindow', 'BankWnd', 'BigBankWnd', 'GuildBankWnd',
-  'MerchantWnd', 'TradeWnd', 'GiveWnd', 'LootWnd', 'SpellBookWnd',
-  'ItemDisplayWindow', 'BuffWindow', 'ShortDurationBuffWindow', 'TargetWindow',
-  'PlayerWindow', 'GroupWindow', 'PetInfoWindow', 'CastingWindow',
-  'ActionsWindow', 'HotButtonWnd', 'HotButtonWnd2', 'HotButtonWnd3',
-  'HotButtonWnd4', 'SelectorWnd', 'ChatWindow', 'RaidWindow', 'MapViewWnd',
-  'SkillsWindow', 'AAWindow', 'FellowshipWnd', 'TaskWnd', 'TradeskillWnd',
-  'BazaarWnd', 'BazaarSearchWnd', 'InspectWnd', 'HelpWnd', 'FriendsWnd',
-  'GuildManagementWnd', 'QuantityWnd', 'LargeDialogWindow',
-  'ConfirmationDialogBox', 'BookWindow', 'QuestJournalNPCWnd', 'RespawnWnd',
-  'CompassWindow', 'Main Chat', 'MQ2 Chat Window', 'MQChatWnd',
-  'ExtendedTargetWnd',
-}
+local uiRects = {}
+local showUiRects = false      -- /npui show: visualize detected occluders
+local nativeWarned = false
 
-local uiRects, lastUiScan = {}, 0
-
-local function probe_window(out, name, names)
-  pcall(function()
-    local w = mq.TLO.Window(name)
-    if w.Open() then
-      local x, y = w.X() or 0, w.Y() or 0
-      local ww, wh = w.Width() or 0, w.Height() or 0
-      if ww > 0 and wh > 0 then
-        out[#out + 1] = { x, y, x + ww, y + wh }
-        if names then names[#names + 1] = name end
+local function scan_ui_rects(names)
+  local nrects, native = uirects.get()
+  if native then
+    uiRects = nrects
+    if names then
+      for idx, rect in ipairs(nrects) do
+        names[idx] = string.format('rect %d,%d %dx%d', rect[1], rect[2],
+                                   rect[3] - rect[1], rect[4] - rect[2])
       end
+      if #nrects == 0 then names[1] = '(native: no visible windows)' end
     end
-  end)
+    return
+  end
+
+  uiRects = {}
+  if names then names[1] = '(native scan unavailable - occlusion OFF)' end
+  if not nativeWarned then
+    nativeWarned = true
+    log.Error('native UI scan unavailable (old eqgfx.dll loaded?) - occlusion DISABLED. Restart EQ to load the current DLL.')
+  end
 end
 
-local function scan_ui_rects(now, names)
-  lastUiScan = now
-  local out = {}
-  for _, name in ipairs(EQ_WINDOWS) do probe_window(out, name, names) end
-  for _, name in ipairs(settings.data.extraWindows or {}) do probe_window(out, name, names) end
-  uiRects = out
-end
-
-local function under_ui(S, sx, sy)
-  if not S.hideUnderUI then return false end
-  local hw = S.bar.width * 0.5 + 10
+local function under_ui(cfg, sx, sy)
+  if not cfg.hideUnderUI then return false end
+  local hw = cfg.bar.width * 0.5 + 10
   local x0, y0 = sx - hw, sy - 26
-  local x1, y1 = sx + hw, sy + S.castbar.height + 28
-  for _, r in ipairs(uiRects) do
-    if x0 < r[3] and x1 > r[1] and y0 < r[4] and y1 > r[2] then return true end
+  local x1, y1 = sx + hw, sy + cfg.castbar.height + 28
+  for _, rect in ipairs(uiRects) do
+    if x0 < rect[3] and x1 > rect[1] and y0 < rect[4] and y1 > rect[2] then return true end
   end
   return false
 end
@@ -124,99 +119,135 @@ local OVERLAY_FLAGS = bit.bor(
   ImGuiWindowFlags.NoFocusOnAppearing, ImGuiWindowFlags.NoBringToFrontOnFocus,
   ImGuiWindowFlags.NoNav)
 
-local lastFrame = os.clock()
 local drawErrLogged = false
+
+-- No clock reads here: the game paces draw frames (~35fps) and a frame
+-- counter drives all animation math. The main loop has NO gating - every
+-- pass does everything. Only the cast tracker touches real time.
+local FRAME_DT = 1 / 35
+local animNow  = 0           -- advances once per drawn frame
 
 local RS = types.ResScope
 
-local function want_res(scope, p)
+local function want_res(scope, plate)
   if scope == RS.OFF then return false end
-  if scope == RS.SELF then return p.isSelf end
-  if scope == RS.GROUP then return p.isSelf or p.inGroup end
-  if scope == RS.PCS then return p.isPC end
+  if scope == RS.SELF then return plate.isSelf end
+  if scope == RS.GROUP then return plate.isSelf or plate.inGroup end
+  if scope == RS.PCS then return plate.isPC end
   return true   -- ALL
 end
 
-local function update_live(p, sp, S, now, dt)
-  local hp = (sp.PctHPs() or 0) / 100
+local function update_live(plate, spawn, cfg, timeNow, dt)
+  local hp = (spawn.PctHPs() or 0) / 100
 
-  if S.anim.damageFlash and hp < p.lastHp - S.anim.flashThreshold then
-    p.flashAt = now
+  if cfg.anim.damageFlash and hp < plate.lastHp - cfg.anim.flashThreshold then
+    plate.flashAt = timeNow
   end
-  p.lastHp = hp
+  plate.lastHp = hp
 
-  if S.anim.hpSmoothing then
-    p.dispHp = anim.approach(p.dispHp, hp, S.anim.hpSpeed, dt)
+  if cfg.anim.hpSmoothing then
+    plate.dispHp = anim.approach(plate.dispHp, hp, cfg.anim.hpSpeed, dt)
   else
-    p.dispHp = hp
+    plate.dispHp = hp
   end
 
-  p.name  = sp.CleanName() or p.name
-  p.alpha = S.anim.fadeIn
-            and anim.clamp01((now - p.bornAt) / math.max(S.anim.fadeInDur, 0.01))
+  plate.name  = spawn.CleanName() or plate.name
+  plate.alpha = cfg.anim.fadeIn
+            and anim.clamp01((timeNow - plate.bornAt) / math.max(cfg.anim.fadeInDur, 0.01))
             or 1
-  p.scale = S.anim.appearPop
-            and anim.ease_out_back((now - p.bornAt) / math.max(S.anim.popDur, 0.01))
+  plate.scale = cfg.anim.appearPop
+            and anim.ease_out_back((timeNow - plate.bornAt) / math.max(cfg.anim.popDur, 0.01))
             or 1
 
   -- mana / endurance (self: authoritative; others: spawn members where valid)
-  p.mana, p.endu = nil, nil
-  if want_res(S.resources.manaScope, p) then
+  plate.mana, plate.endu = nil, nil
+  if want_res(cfg.resources.manaScope, plate) then
     local v
-    if p.isSelf then v = mq.TLO.Me.PctMana()
-    else local okk, sv = pcall(function() return sp.PctMana() end); v = okk and sv or nil end
-    if type(v) == 'number' and (p.isSelf or v > 0) then p.mana = v / 100 end
+    if plate.isSelf then v = mq.TLO.Me.PctMana()
+    else local okk, sv = pcall(function() return spawn.PctMana() end); v = okk and sv or nil end
+    if type(v) == 'number' and (plate.isSelf or v > 0) then plate.mana = v / 100 end
   end
-  if want_res(S.resources.enduScope, p) then
+  if want_res(cfg.resources.enduScope, plate) then
     local v
-    if p.isSelf then v = mq.TLO.Me.PctEndurance()
-    else local okk, sv = pcall(function() return sp.PctEndurance() end); v = okk and sv or nil end
-    if type(v) == 'number' and (p.isSelf or v > 0) then p.endu = v / 100 end
+    if plate.isSelf then v = mq.TLO.Me.PctEndurance()
+    else local okk, sv = pcall(function() return spawn.PctEndurance() end); v = okk and sv or nil end
+    if type(v) == 'number' and (plate.isSelf or v > 0) then plate.endu = v / 100 end
   end
 end
 
-local function draw_plates(dl, S, now, dt)
+-- Plates are gathered first, then drawn far -> near (painter's algorithm)
+-- so closer mobs' plates overlap farther ones; your target always draws last.
+local function draw_plates(drawList, cfg, timeNow, dt)
+  if cfg.hideUnderUI and uirects.native then
+    -- native rects every frame; an empty result only counts once native has
+    -- proven itself (never clobber the TLO sweep's rects otherwise)
+    local rect = uirects.get()
+    if #rect > 0 or uirects.proven then uiRects = rect end
+  end
   local tgtID = mq.TLO.Target.ID() or 0
-  for id, p in pairs(plates) do
+  local me = mq.TLO.Me
+  local mex, mey, mez = me.X() or 0, me.Y() or 0, me.Z() or 0
+  local jobs = {}
+
+  for id, plate in pairs(plates) do
     local isTarget = (id == tgtID)
-    if not p.lostAt then
+    if not plate.lostAt then
       -- LIVE read every frame -> plates track movement exactly.
-      local sp = mq.TLO.Spawn(id)
-      if sp.ID() == id and sp.X() then
-        update_live(p, sp, S, now, dt)
-        local sx, sy, vis = eqgfx.world_to_screen(sp.X(), sp.Y(), sp.Z() + S.bar.zOffset)
+      local spawn = mq.TLO.Spawn(id)
+      if spawn.ID() == id and spawn.X() then
+        update_live(plate, spawn, cfg, timeNow, dt)
+        local x, y, z = spawn.X(), spawn.Y(), spawn.Z()
+        local dx, dy, dz = x - mex, y - mey, z - mez
+        plate.dist = dx * dx + dy * dy + dz * dz
+        local sx, sy, vis = eqgfx.world_to_screen(x, y, z + cfg.bar.zOffset)
         if vis then
-          p.sx, p.sy = sx, sy
-          if not under_ui(S, sx, sy) then
-            local ci = nil
-            if S.castbar.show and (not S.castbar.onlyTarget or isTarget) then
-              ci = casts.get(id)
+          plate.sx, plate.sy = sx, sy
+          if not under_ui(cfg, sx, sy) then
+            local castInfo = nil
+            if cfg.castbar.show and (not cfg.castbar.onlyTarget or isTarget) then
+              castInfo = casts.get(id)
             end
-            render.plate(dl, S, p, ci, now, isTarget)
+            jobs[#jobs + 1] = { plate = plate, castInfo = castInfo, isTarget = isTarget }
           end
         end
       else
-        p.lostAt, p.lossAlpha = now, p.alpha       -- spawn despawned
+        plate.lostAt, plate.lossAlpha = timeNow, plate.alpha       -- spawn despawned
       end
     else
       -- fade out at last known screen position
-      local f = S.anim.fadeOut and anim.fade(p.lostAt, S.anim.fadeOutDur, now) or 0
+      local f = cfg.anim.fadeOut and anim.fade(plate.lostAt, cfg.anim.fadeOutDur, timeNow) or 0
       if f <= 0 then
         plates[id] = nil
-      elseif p.sx and not under_ui(S, p.sx, p.sy) then
-        p.alpha = (p.lossAlpha or 1) * f
-        render.plate(dl, S, p, nil, now, isTarget)
+      elseif plate.sx and not under_ui(cfg, plate.sx, plate.sy) then
+        plate.alpha = (plate.lossAlpha or 1) * f
+        jobs[#jobs + 1] = { plate = plate, castInfo = nil, isTarget = isTarget }
       end
     end
+  end
+
+  -- layering: my own plate on top of everything (target included), then
+  -- the target, then everyone else by distance
+  local function rank(job)
+    if job.plate.isSelf then return 3 end
+    if job.isTarget then return 2 end
+    return 0
+  end
+  table.sort(jobs, function(a2, b2)
+    local ra, rb = rank(a2), rank(b2)
+    if ra ~= rb then return ra < rb end                -- higher rank drawn later
+    return (a2.plate.dist or 0) > (b2.plate.dist or 0)         -- farthest first
+  end)
+  for _, job in ipairs(jobs) do
+    render.plate(drawList, cfg, job.plate, job.castInfo, timeNow, job.isTarget)
   end
 end
 
 local function draw()
-  local now = os.clock()
-  local dt  = now - lastFrame; lastFrame = now
-  local S   = settings.data
+  animNow = animNow + FRAME_DT
+  local timeNow, dt = animNow, FRAME_DT
+  local cfg = settings.data
 
-  if S.enabled then
+  if cfg.enabled then
     -- Fullscreen pass-through window at the BACK of the ImGui window stack:
     -- plates stay under every other ImGui window, and the window context is
     -- what allows DrawTextureAnimation spell icons.
@@ -227,9 +258,16 @@ local function draw()
     local _, show = ImGui.Begin('##eqgfx_nameplates_overlay', true, OVERLAY_FLAGS)
     if show then
       local okk, err = pcall(function()
-        local dl = ImGui.GetWindowDrawList()
-        render.probe_caps(dl)
-        draw_plates(dl, S, now, dt)
+        local drawList = ImGui.GetWindowDrawList()
+        render.probe_caps(drawList)
+        draw_plates(drawList, cfg, timeNow, dt)
+        if showUiRects then
+          local fg = ImGui.GetForegroundDrawList()
+          for n, rect in ipairs(uiRects) do
+            fg:AddRect(ImVec2(rect[1], rect[2]), ImVec2(rect[3], rect[4]), 0xffff00ff, 0, 0, 2.0)
+            fg:AddText(ImVec2(rect[1] + 3, rect[2] + 3), 0xffff00ff, '#' .. n)
+          end
+        end
       end)
       if not okk and not drawErrLogged then
         drawErrLogged = true
@@ -266,32 +304,45 @@ mq.bind('/npdebug', function()
            tostring(c.iconDraw), tostring(c.atlasFound), tostring(c.iconVariant))
   local tid = mq.TLO.Target.ID()
   if tid and tid > 0 then
-    local sp = mq.TLO.Spawn(tid)
-    local bc  = select(2, pcall(function() return sp.BuffCount() end))
-    local cbc = select(2, pcall(function() return sp.CachedBuffCount() end))
-    local p = plates[tid]
-    log.Info('target %s: BuffCount=%s CachedBuffCount=%s plate=%s scanned B=%d D=%d',
-             tostring(sp.CleanName()), tostring(bc), tostring(cbc), tostring(p ~= nil),
-             p and p.buffsB and #p.buffsB or -1, p and p.buffsD and #p.buffsD or -1)
+    local spawn = mq.TLO.Spawn(tid)
+    local bc  = select(2, pcall(function() return spawn.BuffCount() end))
+    local cbc = select(2, pcall(function() return spawn.CachedBuffCount() end))
+    local plate = plates[tid]
+    log.Info('target %s: BuffCount=%s CachedBuffCount=%s plate=%s scanned benefits=%d detriments=%d',
+             tostring(spawn.CleanName()), tostring(bc), tostring(cbc), tostring(plate ~= nil),
+             plate and plate.buffsB and #plate.buffsB or -1, plate and plate.buffsD and #plate.buffsD or -1)
   else
     log.Info('no target - target something buffed and rerun /npdebug')
   end
+  log.Info('loaded eqgfx.dll build: %s', eqgfx.build and eqgfx.build() or '?')
+  log.Info('flags: hideUnderUI=%s dll_stale=%s ui_native=%s findMode=%s uirects.native=%s liveRects=%d',
+           tostring(settings.data.hideUnderUI), tostring(eqgfx.dll_stale),
+           tostring(eqgfx.ui_native), tostring(eqgfx.ui_find_mode and eqgfx.ui_find_mode() or '?'),
+           tostring(uirects.native), #uiRects)
   local names = {}
-  scan_ui_rects(os.clock(), names)
-  log.Info('open EQ windows detected for occlusion: %s',
+  scan_ui_rects(names)
+  log.Info('occlusion source: %s | %s',
+           uirects.native and 'NATIVE (named exports)' or 'TLO window scan',
            #names > 0 and table.concat(names, ', ') or '(none)')
+  log.Info('use /npui show to draw detected occluder rects on screen')
 end)
 
 mq.bind('/npui', function(...)
   local args = { ... }
+  if args[1] == 'show' then
+    showUiRects = not showUiRects
+    log.Info('occluder rect overlay = %s (%d rects)', tostring(showUiRects), #uiRects)
+    return
+  end
   if args[1] == 'add' and args[2] then
     local name = table.concat(args, ' ', 2)
     table.insert(settings.data.extraWindows, name)
+    uirects.add_names({ name })   -- pushed into the native scan's name list
     settings.mark_dirty()
     log.Info('occlusion window added: "%s"', name)
   else
     local names = {}
-    scan_ui_rects(os.clock(), names)
+    scan_ui_rects(names)
     log.Info('open EQ windows detected: %s', #names > 0 and table.concat(names, ', ') or '(none)')
     log.Info('missing one? find its name with /windows, then:  /npui add <Name>')
   end
@@ -302,7 +353,6 @@ log.Info('nameplates running. /npmenu, /npradius N, /nppcs, /npdebug, /npui')
 ----------------------------------------------------------------------------
 -- Main loop: cast tracking + slow plate discovery + debounced settings save.
 ----------------------------------------------------------------------------
-local lastDiscover = 0
 
 -- Buff scan. Self uses Me.Buff directly (always available); other spawns
 -- use MQ's cached buffs - Spawn.Buff(index) with a CachedBuff('*i') fallback.
@@ -335,61 +385,60 @@ local function list_has(list, key)
 end
 
 -- Scan-time filtering + override resolution. Returns false to drop the buff.
-local function apply_buff_rules(BB, e)
-  local key = (e.name or ''):lower()
-  local ov = BB.overrides[key]
+local function apply_buff_rules(buffCfg, entry)
+  local key = (entry.name or ''):lower()
+  local ov = buffCfg.overrides[key]
   if ov and ov.hide then return false end
-  if BB.mineOnly and not e.mine then return false end
-  if BB.filterMode == types.BuffFilterMode.WHITELIST and not list_has(BB.whitelist, key) then
+  if buffCfg.mineOnly and not entry.mine then return false end
+  if buffCfg.filterMode == types.BuffFilterMode.WHITELIST and not list_has(buffCfg.whitelist, key) then
     return false
   end
-  if BB.filterMode == types.BuffFilterMode.BLACKLIST and list_has(BB.blacklist, key) then
+  if buffCfg.filterMode == types.BuffFilterMode.BLACKLIST and list_has(buffCfg.blacklist, key) then
     return false
   end
-  e.scale = (ov and ov.scale) or 1
-  e.prio  = (ov and ov.priority) or 0
+  entry.scale = (ov and ov.scale) or 1
+  entry.prio  = (ov and ov.priority) or 0
   return true
 end
 
 -- Higher priority first (they also survive the maxIcons cap), stable order.
 local function sort_buffs(lst)
-  for n, e in ipairs(lst) do e._i = n end
+  for n, entry in ipairs(lst) do entry._i = n end
   table.sort(lst, function(x, y)
     if x.prio ~= y.prio then return x.prio > y.prio end
     return x._i < y._i
   end)
 end
 
-local function refresh_buffs(p, sp, now, isSelf)
-  p.buffsAt = now
-  local BB = settings.data.buffs
+local function refresh_buffs(plate, spawn, isSelf)
+  local buffCfg = settings.data.buffs
   local myName = mq.TLO.Me.CleanName() or ''
   local seen = {}   -- id -> addedAt from the previous scan (appear flash)
-  for _, lst in ipairs({ p.buffsB, p.buffsD }) do
-    for _, e in ipairs(lst or {}) do seen[e.id] = e.addedAt end
+  for _, lst in ipairs({ plate.buffsB, plate.buffsD }) do
+    for _, entry in ipairs(lst or {}) do seen[entry.id] = entry.addedAt end
   end
-  local B, D = {}, {}
-  local function add(b)
-    if not b then return false end
-    local id = getn(function() return b.SpellID() end)
-            or getn(function() return b.Spell.ID() end)
+  local benefits, detriments = {}, {}
+  local function add(buff)
+    if not buff then return false end
+    local id = getn(function() return buff.SpellID() end)
+            or getn(function() return buff.Spell.ID() end)
     if not id or id <= 0 then return false end
-    local icon = getn(function() return b.SpellIcon() end)
-              or getn(function() return b.Spell.SpellIcon() end) or 0
-    local ben = getbool(function() return b.Beneficial() end)
-    if ben == nil then ben = getbool(function() return b.Spell.Beneficial() end) end
-    local name = getstr(function() return b.Name() end)
-              or getstr(function() return b.Spell.Name() end) or ''
-    local caster = getstr(function() return b.Caster() end)
-                or getstr(function() return b.CasterName() end)
-    local dur = getn(function() return b.Duration() end)
-             or getn(function() return b.Duration.TotalSeconds() end)
+    local icon = getn(function() return buff.SpellIcon() end)
+              or getn(function() return buff.Spell.SpellIcon() end) or 0
+    local ben = getbool(function() return buff.Beneficial() end)
+    if ben == nil then ben = getbool(function() return buff.Spell.Beneficial() end) end
+    local name = getstr(function() return buff.Name() end)
+              or getstr(function() return buff.Spell.Name() end) or ''
+    local caster = getstr(function() return buff.Caster() end)
+                or getstr(function() return buff.CasterName() end)
+    local dur = getn(function() return buff.Duration() end)
+             or getn(function() return buff.Duration.TotalSeconds() end)
     if dur and dur > 30000 then dur = math.floor(dur / 1000) end  -- ms -> s
-    local e = { id = id, icon = icon, ben = ben and true or false,
+    local entry = { id = id, icon = icon, ben = ben and true or false,
                 name = name, mine = (caster == myName),
-                caster = caster, dur = dur, addedAt = seen[id] or now }
-    if apply_buff_rules(BB, e) then
-      if e.ben then B[#B + 1] = e else D[#D + 1] = e end
+                caster = caster, dur = dur, addedAt = seen[id] or timeNow }
+    if apply_buff_rules(buffCfg, entry) then
+      if entry.ben then benefits[#benefits + 1] = entry else detriments[#detriments + 1] = entry end
     end
     return true   -- counts as a slot hit even when filtered out
   end
@@ -406,13 +455,13 @@ local function refresh_buffs(p, sp, now, isSelf)
     end)
   else
     local ok1 = pcall(function()
-      local count = sp.BuffCount() or 0
-      for idx = 1, math.min(count, 40) do add(sp.Buff(idx)) end
+      local count = spawn.BuffCount() or 0
+      for idx = 1, math.min(count, 40) do add(spawn.Buff(idx)) end
     end)
-    if #B + #D == 0 then
+    if #benefits + #detriments == 0 then
       local ok2 = pcall(function()
-        local n = sp.CachedBuffCount() or -1
-        for idx = 1, math.min(n, 40) do add(sp.CachedBuff('*' .. idx)) end
+        local n = spawn.CachedBuffCount() or -1
+        for idx = 1, math.min(n, 40) do add(spawn.CachedBuff('*' .. idx)) end
       end)
       if not ok1 and not ok2 and not buffScanWarned then
         buffScanWarned = true
@@ -420,25 +469,25 @@ local function refresh_buffs(p, sp, now, isSelf)
       end
     end
   end
-  p.buffsB, p.buffsD = B, D
+  plate.buffsB, plate.buffsD = benefits, detriments
 end
 
 
 -- Only real creatures get plates. The plain radius spawn search also returns
 -- auras, campfires, banners, totems, corpses, traps... - all filtered here.
-local function allowed(S, sp, id, myID)
-  if id == myID then return S.show.self end
-  local t = sp.Type()
-  if t == 'NPC' then return S.show.npcs end
-  if t == 'PC'  then return S.show.pcs end
-  if t == 'Pet' or t == 'Mercenary' then return S.show.pets end
+local function allowed(cfg, spawn, id, myID)
+  if id == myID then return cfg.show.self end
+  local t = spawn.Type()
+  if t == 'NPC' then return cfg.show.npcs end
+  if t == 'PC'  then return cfg.show.pcs end
+  if t == 'Pet' or t == 'Mercenary' then return cfg.show.pets end
   return false
 end
 
-local function discover(now)
-  local S = settings.data
+local function discover()
+  local cfg = settings.data
   local myID = mq.TLO.Me.ID()
-  local spec = 'radius ' .. S.radius
+  local spec = 'radius ' .. cfg.radius
   local present = {}
 
   local groupIDs = {}
@@ -452,61 +501,57 @@ local function discover(now)
 
   local cnt = mq.TLO.SpawnCount(spec)() or 0
   for i = 1, cnt do
-    local sp = mq.TLO.NearestSpawn(string.format('%d, %s', i, spec))
-    if sp() and sp.X() then
-      local id = sp.ID()
-      if allowed(S, sp, id, myID) then
+    local spawn = mq.TLO.NearestSpawn(string.format('%d, %s', i, spec))
+    if spawn() and spawn.X() then
+      local id = spawn.ID()
+      if allowed(cfg, spawn, id, myID) then
         present[id] = true
-        local p = plates[id]
-        if p then
-          if p.lostAt then p.lostAt, p.lossAlpha, p.bornAt = nil, nil, now - 1 end
+        local plate = plates[id]
+        if plate then
+          if plate.lostAt then plate.lostAt, plate.lossAlpha, plate.bornAt = nil, nil, animNow - 1 end
         else
-          p = types.Plate.new(id, sp.CleanName() or '?',
-                              (sp.PctHPs() or 0) / 100, now)
-          plates[id] = p
+          plate = types.Plate.new(id, spawn.CleanName() or '?',
+                              (spawn.PctHPs() or 0) / 100, animNow)
+          plates[id] = plate
         end
-        p.isSelf  = (id == myID)
-        p.inGroup = groupIDs[id] or false
-        if p.isPC == nil then
-          p.isPC = (sp.Type() == 'PC')
-          if p.isPC then
-            p.cls      = getstr(function() return sp.Class.Name() end)
-                      or getstr(function() return sp.Class() end)
-            p.clsShort = getstr(function() return sp.Class.ShortName() end)
+        plate.isSelf  = (id == myID)
+        plate.inGroup = groupIDs[id] or false
+        if plate.isPC == nil then
+          plate.isPC = (spawn.Type() == 'PC')
+          if plate.isPC then
+            plate.cls      = getstr(function() return spawn.Class.Name() end)
+                      or getstr(function() return spawn.Class() end)
+            plate.clsShort = getstr(function() return spawn.Class.ShortName() end)
           end
         end
-        if S.buffs.enabled and now - (p.buffsAt or 0) > 0.5 then
-          refresh_buffs(p, sp, now, id == myID)
+        if cfg.buffs.enabled then
+          refresh_buffs(plate, spawn, id == myID)
         end
       end
     end
   end
-  for id, p in pairs(plates) do
-    if not present[id] and not p.lostAt then
-      p.lostAt, p.lossAlpha = now, p.alpha           -- left range -> fade
+  for id, plate in pairs(plates) do
+    if not present[id] and not plate.lostAt then
+      plate.lostAt, plate.lossAlpha = animNow, plate.alpha           -- left range -> fade
     end
   end
 end
 
 while true do
   mq.doevents()
-  local now = os.clock()
-  local S = settings.data
+  local cfg = settings.data
 
-  casts.config{ interruptDetect = S.castbar.interruptDetect }
-  casts.update(now)
+  casts.config{ interruptDetect = cfg.castbar.interruptDetect }
+  casts.update()
 
-  if S.hideUnderUI and now - lastUiScan > 0.3 then scan_ui_rects(now) end
+  if cfg.hideUnderUI then scan_ui_rects() end
 
-  if S.enabled then
-    if now - lastDiscover >= 0.15 then
-      discover(now)
-      lastDiscover = now
-    end
+  if cfg.enabled then
+    discover()
   elseif next(plates) then
     plates = {}
   end
 
-  settings.maybe_save(now, log)
+  settings.maybe_save(log)
   mq.delay(50)
 end

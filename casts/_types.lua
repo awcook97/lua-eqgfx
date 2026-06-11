@@ -7,7 +7,7 @@
 ---@field casterName string
 ---@field spellID integer|nil    nil when the spell link couldn't be parsed
 ---@field spellName string|nil
----@field startedAt number       os.clock() when the cast was detected
+---@field startedAt number       tracker clock stamp when the cast was detected
 ---@field duration number        seconds (from Spell.CastTime; 3s fallback)
 ---@field spellIcon integer|nil  SpellIcon cell in the A_SpellIcons atlas
 ---@field isSelf boolean
@@ -15,6 +15,7 @@
 ---@field lastAnimAt number|nil  last time the cast animation was observed
 ---@field interrupted boolean|nil
 ---@field interruptedAt number|nil
+---@field done boolean|nil        self-cast finished (lingers for the pulse)
 
 local T = {}
 

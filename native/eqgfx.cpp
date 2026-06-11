@@ -39,6 +39,8 @@
 #include <functional>
 #include <atomic>
 
+static void ui_sweep_on_render();   // defined with the UI scan section below
+
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
@@ -188,6 +190,7 @@ void DrawThickScreenLine(float x1, float y1, float x2, float y2, RGB color) {
 
 void OnSceneRender() {
 	g_sceneCalls.fetch_add(1, std::memory_order_relaxed);
+	ui_sweep_on_render();
 	if (!g_pRender || !GetCamera()) return;          // need render iface to draw, camera to project
 
 	std::lock_guard<std::mutex> lock(g_mutex);
@@ -228,7 +231,162 @@ struct eqgfx_spell_geom {
 	int targetType; float range; float aeRange; int coneStart; int coneEnd;
 };
 
+// ---------------------------------------------------------------------------
+// Native EQ UI window enumeration (plate occlusion / indicator clipping).
+//
+// NO struct offsets - everything is resolved BY NAME at runtime from symbols
+// exported by MQ2Main.dll / eqlib.dll (see native/MQ2Main.def, eqlib.def):
+//   FindMQ2Window(name)                      MQ2Main.dll
+//   CXWnd__IsReallyVisible(this)             eqlib.dll (checks parent chain)
+//   ?IsMinimized@CXWnd@eqlib@@QEBA_NXZ       eqlib.dll
+//   CXWnd__GetScreenRect(this, CXRect*)      eqlib.dll (true screen rect)
+// The Lua side supplies the candidate window names (client /windows dump).
+// ---------------------------------------------------------------------------
+#include <string>
+#include <cstring>
+
+struct EqRect { int left, top, right, bottom; };
+
+// FindMQ2Window's parameter changed across MQ versions (const char* vs
+// std::string_view). The export name is identical either way, so the ABI is
+// probed at runtime: whichever variant actually returns windows wins.
+using FnFindWndA = void* (*)(const char* name);              // const char*
+struct SvArg { const char* ptr; size_t len; };
+using FnFindWndB = void* (*)(const SvArg* sv);               // string_view (by ref on x64)
+using FnWndBool  = bool  (*)(void* self);
+using FnWndRect  = EqRect* (*)(void* self, EqRect* out);     // 16-byte aggregate -> hidden ptr
+
+static void*     g_findWnd  = nullptr;
+static int       g_findMode = 0;       // 0 = unprobed, 1 = char*, 2 = string_view
+static FnWndBool g_wndVis  = nullptr;
+static FnWndBool g_wndMin  = nullptr;
+static FnWndRect g_wndRect = nullptr;
+static std::vector<std::string> g_uiNames;
+static std::mutex g_uiMutex;
+
+static void resolve_ui_symbols() {
+	if (HMODULE mq = GetModuleHandleA("MQ2Main.dll"))
+		g_findWnd = reinterpret_cast<void*>(GetProcAddress(mq, "FindMQ2Window"));
+	if (HMODULE eq = GetModuleHandleA("eqlib.dll")) {
+		g_wndVis = reinterpret_cast<FnWndBool>(GetProcAddress(eq, "CXWnd__IsReallyVisible"));
+		if (!g_wndVis)
+			g_wndVis = reinterpret_cast<FnWndBool>(GetProcAddress(eq, "?IsReallyVisible@CXWnd@eqlib@@QEBA_NXZ"));
+		g_wndMin = reinterpret_cast<FnWndBool>(GetProcAddress(eq, "?IsMinimized@CXWnd@eqlib@@QEBA_NXZ"));
+		g_wndRect = reinterpret_cast<FnWndRect>(GetProcAddress(eq, "CXWnd__GetScreenRect"));
+		if (!g_wndRect)
+			g_wndRect = reinterpret_cast<FnWndRect>(GetProcAddress(eq, "?GetScreenRect@CXWnd@eqlib@@QEBA?AVCXRect@2@XZ"));
+	}
+}
+
+// SEH-isolated per-window calls: engine-side faults degrade to "no rect",
+// never to a client crash. (No C++ objects in these frames - C2712.)
+static void* seh_find_a(const char* name) {
+	__try { return ((FnFindWndA)g_findWnd)(name); }
+	__except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+static void* seh_find_b(const char* name, size_t len) {
+	SvArg sv{ name, len };
+	__try { return ((FnFindWndB)g_findWnd)(&sv); }
+	__except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+static void* seh_find(const std::string& name) {
+	if (g_findMode == 2) return seh_find_b(name.c_str(), name.size());
+	return seh_find_a(name.c_str());
+}
+
+static int seh_probe(void* w, float* o) {
+	__try {
+		if (!g_wndVis(w)) return 0;
+		if (g_wndMin && g_wndMin(w)) return 0;
+		EqRect r;
+		g_wndRect(w, &r);
+		if (r.right <= r.left || r.bottom <= r.top) return 0;
+		o[0] = (float)r.left;  o[1] = (float)r.top;
+		o[2] = (float)r.right; o[3] = (float)r.bottom;
+		return 1;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+// ---------------------------------------------------------------------------
+// Render-thread sweep. The GraphicsSceneRender callback (game thread, where
+// engine calls are legal) runs the full window sweep every frame and caches
+// the rects; eqgfx_get_ui_rects() is then a snapshot copy - the Lua script
+// thread never pays for lookups. This is the "multithreaded" sweep: work on
+// the render hook, reads from the script, handoff under one small mutex.
+// ---------------------------------------------------------------------------
+static float g_uiCache[512];          // 128 rects * 4
+static int   g_uiCacheCount = 0;
+
+static void ui_sweep_on_render() {
+	if (!g_findWnd || !g_wndVis || !g_wndRect) return;
+	std::lock_guard<std::mutex> lock(g_uiMutex);
+	if (g_uiNames.empty()) return;
+
+	// one-time ABI probe (const char* vs string_view) on the game thread
+	if (g_findMode == 0) {
+		for (const auto& n : g_uiNames) {
+			if (seh_find_a(n.c_str())) { g_findMode = 1; break; }
+		}
+		if (g_findMode == 0) {
+			for (const auto& n : g_uiNames) {
+				if (seh_find_b(n.c_str(), n.size())) { g_findMode = 2; break; }
+			}
+		}
+		if (g_findMode == 0) return;
+	}
+
+	int count = 0;
+	for (const auto& n : g_uiNames) {
+		if (count >= 128) break;
+		if (void* w = seh_find(n))
+			count += seh_probe(w, g_uiCache + count * 4);
+	}
+	g_uiCacheCount = count;
+}
+
 extern "C" {
+
+// Newline-separated candidate window names from Lua (client /windows dump).
+__declspec(dllexport) void eqgfx_set_ui_names(const char* newlineSeparated) {
+	std::lock_guard<std::mutex> lock(g_uiMutex);
+	g_uiNames.clear();
+	if (!newlineSeparated) return;
+	const char* p = newlineSeparated;
+	while (*p) {
+		const char* nl = strchr(p, '\n');
+		size_t len = nl ? (size_t)(nl - p) : strlen(p);
+		if (len) g_uiNames.emplace_back(p, len);
+		p = nl ? nl + 1 : p + len;
+	}
+}
+
+__declspec(dllexport) int eqgfx_ui_available() {
+	return (g_findWnd && g_wndVis && g_wndRect) ? 1 : 0;
+}
+
+// Snapshot of the render-thread sweep's cache: x0,y0,x1,y1 per really-
+// visible, non-minimized EQ window. No lookups happen on this thread.
+__declspec(dllexport) int eqgfx_get_ui_rects(float* out, int maxRects) {
+	if (!out || maxRects <= 0 || !eqgfx_ui_available()) return 0;
+	std::lock_guard<std::mutex> lock(g_uiMutex);
+	int count = g_uiCacheCount < maxRects ? g_uiCacheCount : maxRects;
+	if (count > 0) memcpy(out, g_uiCache, (size_t)count * 4 * sizeof(float));
+	return count;
+}
+
+// Compile stamp so /npdebug can prove WHICH dll the game actually loaded.
+__declspec(dllexport) const char* eqgfx_build() {
+	return __DATE__ " " __TIME__;
+}
+
+// 0 = unprobed/none, 1 = const char*, 2 = string_view (for /npdebug)
+__declspec(dllexport) int eqgfx_ui_find_mode() {
+	return g_findMode;
+}
+
 
 __declspec(dllexport) int eqgfx_init(void* pRenderInterface, void* pSpellManager) {
 	g_pRender   = pRenderInterface;
@@ -236,6 +394,7 @@ __declspec(dllexport) int eqgfx_init(void* pRenderInterface, void* pSpellManager
 	if (!g_pRender) return 1;
 	if (g_callbackId >= 0) return 0;
 	HMODULE hMain = GetModuleHandleA("MQ2Main.dll");
+	resolve_ui_symbols();
 	if (!hMain) return 2;
 	auto add = reinterpret_cast<FnAddRenderCallbacks>(GetProcAddress(hMain, kSymAdd));
 	g_removeCallbacks = reinterpret_cast<FnRemoveRenderCallbacks>(GetProcAddress(hMain, kSymRemove));
