@@ -19,16 +19,15 @@
  * (mq::AddRenderCallbacks), the sanctioned hook, in native C++ so we never
  * re-enter LuaJIT from the render thread.
  *
- * PATCH RESILIENCE
- * ----------------
- * Bakes in ZERO game *addresses*: the live render interface + spell manager
- * come from Lua (read from eqlib.dll exports), AddRenderCallbacks is resolved
- * from MQ2Main.dll at runtime. Hard-coded only: engine *layout* (vtable order +
- * struct field offsets), stable across monthly patches. Layout refs:
- *   src/eqlib/include/eqlib/graphics/RenderInterface.h  (DrawLine2D vtable idx)
- *   src/eqlib/include/eqlib/graphics/Render.h           (matrixViewProj @0x1700)
- *   src/eqlib/include/eqlib/game/Spells.h               (EQ_Spell field offsets)
- *   src/main/GraphicsEngine.h                           (MQRenderCallbacks)
+ * RUNTIME RESOLUTION
+ * ------------------
+ * The live render interface + spell manager come from Lua (read from
+ * eqlib.dll exports); AddRenderCallbacks is resolved from MQ2Main.dll at
+ * runtime. Reference headers for the engine-facing calls:
+ *   src/eqlib/include/eqlib/graphics/RenderInterface.h
+ *   src/eqlib/include/eqlib/graphics/Render.h
+ *   src/eqlib/include/eqlib/game/Spells.h
+ *   src/main/GraphicsEngine.h
  */
 
 #include <windows.h>
@@ -234,8 +233,8 @@ struct eqgfx_spell_geom {
 // ---------------------------------------------------------------------------
 // Native EQ UI window enumeration (plate occlusion / indicator clipping).
 //
-// NO struct offsets - everything is resolved BY NAME at runtime from symbols
-// exported by MQ2Main.dll / eqlib.dll (see native/MQ2Main.def, eqlib.def):
+// Everything here is resolved BY NAME at runtime from symbols exported by
+// MQ2Main.dll / eqlib.dll (see native/MQ2Main.def, eqlib.def):
 //   FindMQ2Window(name)                      MQ2Main.dll
 //   CXWnd__IsReallyVisible(this)             eqlib.dll (checks parent chain)
 //   ?IsMinimized@CXWnd@eqlib@@QEBA_NXZ       eqlib.dll
@@ -258,7 +257,7 @@ using FnWndRect  = EqRect* (*)(void* self, EqRect* out);     // 16-byte aggregat
 
 static void*     g_findWnd  = nullptr;
 static int       g_findMode = 0;       // 0 unprobed, 1 char*, 2 string_view,
-                                       // 3/4 = same via deref'd offset var, -1 gave up
+                                       // 3/4 = same via deref'd export var, -1 gave up
 static FnWndBool g_wndVis  = nullptr;
 static FnWndBool g_wndMin  = nullptr;
 static FnWndRect g_wndRect = nullptr;
@@ -267,12 +266,12 @@ static std::mutex g_uiMutex;
 static int g_uiStatNames = 0, g_uiStatFound = 0, g_uiStatFaults = 0;
 
 // The MANGLED ?...@eqlib@@ exports are real compiled eqlib member functions.
-// The flat CXWnd__* names are EQLIB_VAR uintptr_t OFFSET VARIABLES holding the
-// game function's address (same convention as the pinst* exports) - "calling"
-// the variable executes its data bytes, faults into the SEH probe handler, and
-// the sweep silently reports zero windows while eqgfx_ui_available() still
-// says 1. So: prefer the mangled functions, deref the flat variables only as
-// a fallback for builds that don't export the mangled names.
+// The flat CXWnd__* names are EQLIB_VAR uintptr_t VARIABLES holding the
+// resolved function's address (same convention as the pinst* exports) -
+// "calling" the variable executes its data bytes, faults into the SEH probe
+// handler, and the sweep silently reports zero windows while
+// eqgfx_ui_available() still says 1. So: prefer the mangled functions, deref
+// the flat variables only as a fallback for builds without the mangled names.
 static void resolve_ui_symbols() {
 	if (HMODULE mq = GetModuleHandleA("MQ2Main.dll"))
 		g_findWnd = reinterpret_cast<void*>(GetProcAddress(mq, "FindMQ2Window"));
@@ -304,7 +303,7 @@ static void* seh_find_b(void* fn, const char* name, size_t len) {
 	__except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
 
-// Safely read a uintptr_t export slot (FindMQ2Window-as-offset-variable case).
+// Safely read a uintptr_t export slot (FindMQ2Window-as-variable case).
 static void* seh_deref(void* p) {
 	__try { return (void*)*(uintptr_t*)p; }
 	__except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
@@ -350,7 +349,7 @@ static void ui_sweep_on_render() {
 	if (g_uiNames.empty()) return;
 
 	// One-time ABI probe on the game thread: direct call with const char* /
-	// string_view (modes 1/2), then the same through a deref'd offset variable
+	// string_view (modes 1/2), then the same through a deref'd export variable
 	// (modes 3/4). On total failure mark -1 - a names re-push re-probes.
 	if (g_findMode == 0) {
 		for (int m = 1; m <= 4 && g_findMode == 0; ++m) {

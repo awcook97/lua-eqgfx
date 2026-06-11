@@ -2,10 +2,9 @@
   core/init.lua - LuaJIT FFI binding for eqgfx.dll (native EQGraphics drawing).
 
   Pulls the LIVE CRenderInterface* and ClientSpellManager* straight out of
-  eqlib.dll's exported symbols, so nothing here bakes in a game address and it
-  keeps working across monthly EQ patches. Hands those pointers to eqgfx.dll,
-  which does the actual native DrawLine3D from the render callback and reads
-  spell data from the struct.
+  eqlib.dll's exported symbols and hands those pointers to eqgfx.dll, which
+  does the actual native drawing from the render callback and reads spell
+  data from the engine.
 
   Usage:
     local eqgfx = require('eqgfx')
@@ -176,7 +175,7 @@ function M.init()
   -- CXWndManager -> native UI window enumeration (older eqlib builds may not
   -- export it; everything degrades to the Lua-side Window TLO scan).
   -- Native UI enumeration: the DLL resolves FindMQ2Window / CXWnd methods
-  -- BY NAME from MQ2Main.dll / eqlib.dll exports - no struct offsets. If the
+  -- BY NAME from MQ2Main.dll / eqlib.dll exports. If the
   -- loaded eqgfx.dll predates these exports (game launched before a rebuild),
   -- flag it so scripts tell the user to restart EQ instead of failing quietly.
   M.ui_native = false
@@ -194,7 +193,7 @@ function M.build()
 end
 
 -- FindMQ2Window ABI variant in use (0 unprobed, 1 char*, 2 string_view,
--- 3/4 the same through a deref'd offset variable, -1 nothing worked).
+-- 3/4 the same through a deref'd export variable, -1 nothing worked).
 function M.ui_find_mode()
   local okk, v = pcall(function() return lib.eqgfx_ui_find_mode() end)
   return okk and v or -1

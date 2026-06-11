@@ -50,11 +50,9 @@ Three problems, three solutions:
    LuaJIT, so a normal C Lua module would load a *second* LuaJIT and corrupt
    coroutines. Instead `eqgfx.dll` exposes a plain `extern "C"` ABI and Lua calls
    it over **LuaJIT FFI** (same trick as calling `winhttp.dll`). It also reads the
-   live, per-patch engine pointers out of `eqlib.dll`'s exported symbols
-   (`pinstRenderInterface`, `pinstSpellManager`, `pinstCDisplay`) — so **no game
-   offsets are baked into the DLL** and it survives monthly EQ patches without a
-   rebuild. The only hard-coded engine knowledge is vtable/struct *layout*
-   (method order, field offsets), which is stable across patches.
+   live engine pointers out of `eqlib.dll`'s exported symbols
+   (`pinstRenderInterface`, `pinstSpellManager`, `pinstCDisplay`), so there is
+   nothing game-version-specific to configure.
 
 ---
 
@@ -92,7 +90,7 @@ Each feature folder keeps its types, classes and enums in a `_types.lua`.
 ./native/build_eqgfx.sh
 ```
 `native/eqgfx.dll` is written next to the build script. It's self-contained (imports only
-`KERNEL32.dll`) — no game offsets, no second LuaJIT.
+`KERNEL32.dll`) — no second LuaJIT.
 
 ## Install
 
@@ -152,11 +150,6 @@ projection. Safe to ignore.)
 
 ## Caveats
 
-- **Layout, not addresses, is hard-coded.** vtable indices (`DrawLine2D`,
-  `ProjectWorldCoordinatesToScreen`, `GetSpellByID`) and struct offsets
-  (`EQ_Spell` fields, `CDisplay::pCamera`) come from MQ's eqlib headers. Monthly
-  patches that only move addresses are fine; a patch that *reorders* an interface
-  or changes a struct means bumping those constants in `native/eqgfx.cpp`.
 - **DX11 client only.** The legacy DX9 3D path (`DrawLine3D`) doesn't composite
   on this client; we use the 2D overlay path + CPU projection instead.
 - Cone/beam facing uses EQ heading and may need a sign tweak per client.
@@ -168,7 +161,6 @@ projection. Safe to ignore.)
 1. Edit `native/eqgfx.cpp` and/or the Lua, rebuild with `./native/build_eqgfx.sh`.
 2. The `tools/calibrate.lua` / `tools/debug.lua` tools are there for diagnosing
    projection/rendering if you change the engine-facing code.
-3. Keep the "no baked offsets" rule: read live pointers from `eqlib.dll` exports;
-   only encode stable *layout* (and comment the header each index/offset came
-   from). PRs welcome — new primitives, text rendering, more spell shapes,
-   nameplate styling.
+3. Resolve whatever the engine needs from `eqlib.dll` / `MQ2Main.dll` exports
+   at runtime, and keep failures visible (`/npdebug`). PRs welcome — new
+   primitives, text rendering, more spell shapes, nameplate styling.

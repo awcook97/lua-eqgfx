@@ -11,9 +11,9 @@ running and customized.
 
 - **MacroQuest** on the **DirectX 11** EverQuest client, using a standard
   (non-static) MQ build so `eqlib.dll` exports its symbols.
-- Nothing else. The prebuilt `native/eqgfx.dll` ships with the repo and bakes
-  in **no game addresses** — it resolves the live engine pointers from
-  MacroQuest's own exports at runtime, so it survives monthly EQ patches.
+- Nothing else. The prebuilt `native/eqgfx.dll` ships with the repo and
+  configures itself from your MacroQuest install at runtime — there is
+  nothing game-version-specific to set up.
 - Building the DLL yourself is **optional** and only needed if you change the
   C++ side (see [DEVELOPING.md](DEVELOPING.md)). It works on Linux/Wine via
   msvc-wine — that's the environment eqgfx was built for.

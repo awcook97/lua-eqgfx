@@ -51,20 +51,17 @@ keep `lua-language-server --check .` at zero problems.
 
 ---
 
-## Patch resilience: names, not addresses
+## Resolving the engine at runtime
 
-`eqgfx.dll` hard-codes **zero game addresses**. Live pointers come from
-symbols exported by `eqlib.dll` / `MQ2Main.dll` (`pinstRenderInterface`,
-`pinstSpellManager`, `pinstCDisplay`, `FindMQ2Window`, ...). Only *layout*
-is encoded (vtable indices, struct field offsets) with a comment naming the
-eqlib header each one came from. Monthly patches that move addresses are
-free; a patch that reorders an interface means bumping a constant in
-`native/eqgfx.cpp`.
+Everything engine-facing is resolved at runtime from symbols exported by
+`eqlib.dll` / `MQ2Main.dll` (`pinstRenderInterface`, `pinstSpellManager`,
+`pinstCDisplay`, `FindMQ2Window`, ...). Keep it that way: resolve by name,
+have a fallback, and make resolution failures visible (`/npdebug`).
 
 ### Export gotchas (learned the hard way)
 
-- **eqlib's flat `CXWnd__*` exports are `uintptr_t` offset VARIABLES**, not
-  functions — data slots holding the game function's address (same
+- **eqlib's flat `CXWnd__*` exports are `uintptr_t` variables**, not
+  functions — data slots holding the resolved function's address (same
   convention as `pinst*`). `GetProcAddress` happily returns them and calling
   one executes data bytes. The mangled `?...@eqlib@@` exports are the real
   compiled member functions. Resolve mangled first; deref the flat name as a
@@ -79,13 +76,6 @@ free; a patch that reorders an interface means bumping a constant in
 - **`FindMQ2Window`'s parameter ABI varies** across MQ builds (`const char*`
   vs `std::string_view`). The sweep probes the variants once at runtime
   (including through a deref'd variable) and locks in whichever works.
-
-### Engine layout currently encoded
-
-See the `enum : size_t` blocks at the top of `native/eqgfx.cpp` — vtable
-indices for `DrawLine2D`, projection and spell lookup, `CDisplay::pCamera`,
-`CRender::matrixViewProj`, and the `EQ_Spell` geometry fields. Each cites
-its eqlib header.
 
 ---
 
@@ -188,6 +178,5 @@ dirty; the main loop saves when dirty).
   zero `lua-language-server --check` problems.
 - TLO reads that can fail are pcall-wrapped (see the `getn/getstr/getbool`
   helpers); members differ across MQ builds more than you'd hope.
-- New engine knowledge goes into `native/eqgfx.cpp` with the header path it
-  came from; new symbols are resolved by name with a fallback and a way to
+- New symbols are resolved by name at runtime, with a fallback and a way to
   see the failure (`/npdebug`).
