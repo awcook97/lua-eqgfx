@@ -1,6 +1,6 @@
-EQGFX - Render Lua Inside of EQ
+# EQGFX - Render Lua Inside of EQ
 
-Use Lua to render things inside of the game
+*Use Lua to render things inside of the game*
 
 Includes the native EQGFX Library to interact with the game, as well as a nameplates example & casting AE Example.
 
