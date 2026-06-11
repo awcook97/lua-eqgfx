@@ -1,0 +1,44 @@
+# Creates a GitHub Release with eqgfx.zip attached whenever a v* tag is
+# pushed:
+#   git tag v0.1.0 && git push origin v0.1.0
+# Needs no secrets - GITHUB_TOKEN is built in (permissions below).
+
+name: Release
+
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          path: eqgfx
+
+      - name: Build Zip File
+        # tracked files only reach CI, but keep the full exclusion list so
+        # the command stays identical to a local build from lua/
+        run: >
+          zip -rq eqgfx.zip eqgfx
+          -x "eqgfx/.git/*" "eqgfx/.git/" "eqgfx/.github/*" "eqgfx/.github/"
+          "eqgfx/.claude/*" "eqgfx/.claude/" "eqgfx/assets/*" "eqgfx/assets/"
+          "eqgfx/test/*" "eqgfx/test/" "eqgfx/docs/hidden/*" "eqgfx/docs/hidden/"
+          "eqgfx/.gitignore" "eqgfx/.luarc.json"
+          "eqgfx/native/*.def" "eqgfx/native/*.exp" "eqgfx/native/*.lib"
+          "eqgfx/native/*.obj" "eqgfx/native/eqgfx_run_*.dll"
+          "eqgfx/*.obj" "eqgfx/*.exp" "eqgfx/*.lib" "eqgfx/eqgfx.zip"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh release create "${{ github.ref_name }}" eqgfx.zip
+          --repo "${{ github.repository }}"
+          --title "${{ github.ref_name }}"
+          --generate-notes
